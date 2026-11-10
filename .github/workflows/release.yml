@@ -1,0 +1,64 @@
+name: Release Apple Silicon app
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Read version and verify architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          if [[ "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "LUMAPHASE_VERSION=${BASH_REMATCH[1]}" >> "$GITHUB_ENV"
+          else
+            echo "Expected vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-prerelease" >&2
+            exit 1
+          fi
+          xcodebuild -version
+          swift --version
+
+      - name: Run tests without opening the app
+        run: swift test --arch arm64 --jobs 3
+
+      - name: Build and package arm64 app
+        env:
+          LUMAPHASE_BUILD: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          bash Scripts/bundle.sh release
+          test "$(lipo -archs .build/Lumaphase.app/Contents/MacOS/Lumaphase)" = arm64
+          codesign --verify --strict .build/Lumaphase.app
+          ditto -c -k --sequesterRsrc --keepParent \
+            .build/Lumaphase.app "Lumaphase-${RELEASE_TAG}-macOS-arm64.zip"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          prerelease=false
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            prerelease=true
+          fi
+          gh release create "$RELEASE_TAG" \
+            "Lumaphase-${RELEASE_TAG}-macOS-arm64.zip" \
+            --verify-tag --generate-notes --title "Lumaphase ${RELEASE_TAG}" \
+            --prerelease="$prerelease"

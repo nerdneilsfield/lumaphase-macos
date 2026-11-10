@@ -1,0 +1,15 @@
+{
+  "upstream": "opencv/opencv",
+  "release": "4.10.0",
+  "dictionary": "DICT_4X4_50",
+  "source": "https://github.com/opencv/opencv/blob/4.10.0/modules/objdetect/src/aruco/predefined_dictionaries.hpp",
+  "definition": "https://github.com/opencv/opencv/blob/4.10.0/modules/objdetect/src/aruco/aruco_dictionary.cpp",
+  "storage": "First four DICT_4X4_1000_BYTES entries, rotation 0; DICT_4X4_50 uses the first 50 entries of this table.",
+  "bit_order": "Row-major 4x4; each byte most-significant bit first; 1 is white, 0 is black; border and quiet zone are not included.",
+  "markers": [
+    {"id": 0, "bytes": [181, 50]},
+    {"id": 1, "bytes": [15, 154]},
+    {"id": 2, "bytes": [51, 45]},
+    {"id": 3, "bytes": [153, 70]}
+  ]
+}
