@@ -10,7 +10,7 @@ import OpticDisplay
 final class SessionController: NSObject, ObservableObject {
     // MARK: - Operator settings
     @Published var profile: ExperimentProfile = .m59S1
-    @Published var layoutProfile: LayoutProfile = .f68
+    @Published private(set) var geometryProfile: GeometryProfile = .f68G6x12
     @Published var rotationDeg: Int = 0
     @Published var lowLevel: Int = 32
     @Published var highLevel: Int = 224
@@ -63,7 +63,7 @@ final class SessionController: NSObject, ObservableObject {
     /// cannot leak into later segments or the export.
     private struct FrozenConfig {
         var profile: ExperimentProfile
-        var layoutProfile: LayoutProfile
+        var geometryProfile: GeometryProfile
         var rotationDeg: Int
         var lowLevel: Int
         var highLevel: Int
@@ -154,11 +154,25 @@ final class SessionController: NSObject, ObservableObject {
 
     private func apply(options: AppOptions) {
         profile = options.profile
-        layoutProfile = options.layoutProfile
+        geometryProfile = options.geometryProfile
         rotationDeg = options.rotationDeg
         if let seconds = options.runningSeconds { runningSeconds = seconds }
         if let output = options.outputDirectory { outputDirectory = output }
         windowed = options.windowed || options.smoke
+    }
+
+    var canChangeGeometry: Bool { !isBusy || state == .running || state == .paused }
+
+    func changeGeometry(_ geometry: GeometryProfile) {
+        guard canChangeGeometry, geometry != geometryProfile else { return }
+        geometryProfile = geometry
+        if config != nil, state == .running || state == .paused {
+            config?.geometryProfile = geometry
+            if state == .running {
+                rebuildSegment(endReason: .configurationChanged)
+            }
+            // A paused session has no active segment; resume creates the new one.
+        }
     }
 
     private func makeLevels() -> PatternLevels {
@@ -223,7 +237,7 @@ final class SessionController: NSObject, ObservableObject {
         do {
             let layout = try LayoutBuilder.make(
                 layoutID: "preview",
-                profile: layoutProfile,
+                geometryProfile: geometryProfile,
                 drawable: size,
                 rotationDeg: rotationDeg,
                 levels: makeLevels()
@@ -233,7 +247,7 @@ final class SessionController: NSObject, ObservableObject {
             driver.setPlan(.preview(layout: layout, text: nil, token: 1))
             driver.start()
             previewDriver = driver
-            statusText = "预览中：\(layoutProfile.rawValue) 示例状态，未创建会话、未写日志。"
+            statusText = "预览中：\(geometryProfile.rawValue) 示例状态，未创建会话、未写日志。"
         } catch {
             statusText = "预览失败：\(error)"
         }
@@ -304,7 +318,7 @@ final class SessionController: NSObject, ObservableObject {
         guard !isBusy else { return }
         config = FrozenConfig(
             profile: profile,
-            layoutProfile: layoutProfile,
+            geometryProfile: geometryProfile,
             rotationDeg: rotationDeg,
             lowLevel: lowLevel,
             highLevel: highLevel,
@@ -653,7 +667,7 @@ final class SessionController: NSObject, ObservableObject {
         guard let driver else { return }
         let text = makeCardText(segment: segment, lines: [
             "OPTC-1  \(config?.profile.rawValue ?? profile.rawValue)",
-            "WARMUP  \(config?.layoutProfile.rawValue ?? layoutProfile.rawValue)  请求 \(requestedRefreshText)"
+            "WARMUP  \(config?.geometryProfile.rawValue ?? geometryProfile.rawValue)  请求 \(requestedRefreshText)"
         ])
         driver.setPlan(.card(segment, kind: .warmup, phase: .warmup, text: text, token: nextToken()))
     }
@@ -676,7 +690,7 @@ final class SessionController: NSObject, ObservableObject {
         let text = makeCardText(segment: segment, lines: [
             "OPTC-1  MACOS  START",
             sessionID?.description ?? "",
-            "\(config?.profile.rawValue ?? profile.rawValue)  \(config?.layoutProfile.rawValue ?? layoutProfile.rawValue)  \(requestedRefreshText)"
+            "\(config?.profile.rawValue ?? profile.rawValue)  \(config?.geometryProfile.rawValue ?? geometryProfile.rawValue)  \(requestedRefreshText)"
         ])
         driver.setPlan(.card(segment, kind: .sessionCard, phase: .sessionCard, text: text, token: nextToken()))
     }
@@ -724,7 +738,7 @@ final class SessionController: NSObject, ObservableObject {
         let text = makeCardText(segment: segment, lines: [
             "OPTC-1  MACOS  END",
             sessionID?.description ?? "",
-            "\(config?.profile.rawValue ?? profile.rawValue)  \(config?.layoutProfile.rawValue ?? layoutProfile.rawValue)"
+            "\(config?.profile.rawValue ?? profile.rawValue)  \(config?.geometryProfile.rawValue ?? geometryProfile.rawValue)"
         ])
         driver.setPlan(.card(segment, kind: .endCard, phase: .endCard, text: text, token: nextToken()))
     }
@@ -877,7 +891,7 @@ final class SessionController: NSObject, ObservableObject {
         let size = driver.drawableSize
         let layout = try LayoutBuilder.make(
             layoutID: "layout-\(nextLayoutIndex)",
-            profile: config.layoutProfile,
+            geometryProfile: config.geometryProfile,
             drawable: size,
             rotationDeg: config.rotationDeg,
             levels: config.levels
@@ -1092,7 +1106,7 @@ final class SessionController: NSObject, ObservableObject {
         let frozen = config
         if frozen?.calibrationGeometry ?? calibrationGeometry {
             calibrationSteps.append((5 * 1_000_000_000,
-                .geometry(moduleCount: (frozen?.layoutProfile ?? layoutProfile).moduleCount),
+                .geometry(moduleCount: (frozen?.geometryProfile.layoutProfile ?? geometryProfile.layoutProfile).moduleCount),
                 "CALIBRATION geometry: ArUco markers + 1px module boundaries; module indices are in layout.json"))
         }
         if frozen?.calibrationStaircase ?? calibrationStaircase {

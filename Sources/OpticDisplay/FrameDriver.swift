@@ -219,7 +219,7 @@ public final class FrameDriver: NSObject, CAMetalDisplayLinkDelegate {
             // remains a one-shot render, not a full-rate loop.
             let usable = (try? LayoutBuilder.make(
                 layoutID: layout.layoutID,
-                profile: layout.profile,
+                geometryProfile: layout.geometryProfile,
                 drawable: actual,
                 rotationDeg: layout.patternRotationDeg,
                 levels: layout.levels

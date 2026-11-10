@@ -37,10 +37,67 @@ public struct MarkerPlacement: Equatable {
     }
 }
 
+/// Placement is independent of the optical payload family. The shared grids are
+/// supported by the core; the Mac operator chooses only `macOSCases`.
+public enum GeometryProfile: String, CaseIterable {
+    case f68 = "F68"
+    case c52 = "C52"
+    case f68G6x12 = "F68-G6x12"
+    case c52G5x12 = "C52-G5x12"
+    case f68G9x8 = "F68-G9x8"
+    case c52G9x6 = "C52-G9x6"
+
+    public static let macOSCases: [GeometryProfile] = [.f68G6x12, .c52G5x12, .f68, .c52]
+
+    public var layoutProfile: LayoutProfile {
+        switch self {
+        case .f68, .f68G6x12, .f68G9x8: return .f68
+        case .c52, .c52G5x12, .c52G9x6: return .c52
+        }
+    }
+
+    public var rows: Int {
+        switch self {
+        case .f68, .c52: return 1
+        case .f68G6x12: return 6
+        case .c52G5x12: return 5
+        case .f68G9x8, .c52G9x6: return 9
+        }
+    }
+
+    public var columns: Int {
+        switch self {
+        case .f68: return 68
+        case .c52: return 52
+        case .f68G6x12, .c52G5x12: return 12
+        case .f68G9x8: return 8
+        case .c52G9x6: return 6
+        }
+    }
+
+    public var paddingCount: Int { rows * columns - layoutProfile.moduleCount }
+}
+
+public struct PaddingPlacement: Equatable {
+    public let slotIndex: Int
+    public let rectPx: RectPx
+    public let level: UInt8
+
+    public func json() -> JSONValue {
+        .object([
+            "slot_index": .int(Int64(slotIndex)),
+            "role": .string("padding"),
+            "rect_px": .array(rectPx.jsonArray),
+            "level": .int(Int64(level))
+        ])
+    }
+}
+
 /// Immutable layout of one segment's optical target.
 public struct LayoutSpec: Equatable {
     public let layoutID: String
-    public let profile: LayoutProfile
+    public let geometryProfile: GeometryProfile
+    public var profile: LayoutProfile { geometryProfile.layoutProfile }
     public let drawableSize: PixelSize
     /// Pre-rotation logical canvas. For 90/270 this is the drawable size with
     /// width and height swapped.
@@ -49,30 +106,32 @@ public struct LayoutSpec: Equatable {
     public let levels: PatternLevels
     /// Bounding rectangle of the dynamic area after rotation.
     public let dynamicRectPx: RectPx
-    /// One entry per protocol module; each rect is the full-height column
-    /// strip of that module after rotation.
+    /// Protocol modules only, in unchanged encoder order, after rotation.
     public let modules: [RectPx]
+    public let padding: [PaddingPlacement]
     public let markers: [MarkerPlacement]
 
     public init(
         layoutID: String,
-        profile: LayoutProfile,
+        geometryProfile: GeometryProfile,
         drawableSize: PixelSize,
         patternSize: PixelSize,
         patternRotationDeg: Int,
         levels: PatternLevels,
         dynamicRectPx: RectPx,
         modules: [RectPx],
+        padding: [PaddingPlacement],
         markers: [MarkerPlacement]
     ) {
         self.layoutID = layoutID
-        self.profile = profile
+        self.geometryProfile = geometryProfile
         self.drawableSize = drawableSize
         self.patternSize = patternSize
         self.patternRotationDeg = patternRotationDeg
         self.levels = levels
         self.dynamicRectPx = dynamicRectPx
         self.modules = modules
+        self.padding = padding
         self.markers = markers
     }
 
@@ -84,6 +143,14 @@ public struct LayoutSpec: Equatable {
         .object([
             "layout_id": .string(layoutID),
             "layout_profile": .string(profile.rawValue),
+            "geometry_profile": .string(geometryProfile.rawValue),
+            "grid_rows": .int(Int64(geometryProfile.rows)),
+            "grid_cols": .int(Int64(geometryProfile.columns)),
+            "module_count": .int(Int64(profile.moduleCount)),
+            "padding_count": .int(Int64(padding.count)),
+            "module_order": .string("row-major"),
+            "sampling_inner_fraction": .double(0.6),
+            "padding": .array(padding.map { $0.json() }),
             "drawable_width_px": .int(Int64(drawableSize.width)),
             "drawable_height_px": .int(Int64(drawableSize.height)),
             "coordinate_system": .string("DRAWABLE_TOP_LEFT_PIXEL_EDGES"),
@@ -113,6 +180,8 @@ public enum LayoutError: Error, Equatable {
     case dynamicWidthTooSmall(drawableWidthPx: Int, moduleCount: Int)
     case markersDoNotFit(drawable: PixelSize, cellSizePx: Int)
     case emptyLayoutID
+    case dynamicHeightTooSmall(drawableHeightPx: Int, rows: Int)
+    case invalidLevels
 }
 
 /// Builds integer layouts from the contract formulas. No anti-aliasing and no
@@ -127,6 +196,18 @@ public enum LayoutBuilder {
     public static func make(
         layoutID: String,
         profile: LayoutProfile,
+        drawable: PixelSize,
+        rotationDeg: Int,
+        levels: PatternLevels = .sdrDefault
+    ) throws -> LayoutSpec {
+        try make(layoutID: layoutID,
+                 geometryProfile: profile == .f68 ? .f68 : .c52,
+                 drawable: drawable, rotationDeg: rotationDeg, levels: levels)
+    }
+
+    public static func make(
+        layoutID: String,
+        geometryProfile: GeometryProfile,
         drawable: PixelSize,
         rotationDeg: Int,
         levels: PatternLevels = .sdrDefault
@@ -147,26 +228,22 @@ public enum LayoutBuilder {
             patternSize = PixelSize(width: drawable.height, height: drawable.width)
         }
 
-        let moduleCount = profile.moduleCount
+        guard levels.low < levels.high else { throw LayoutError.invalidLevels }
+        let moduleCount = geometryProfile.layoutProfile.moduleCount
         let bw = patternSize.width * dynamicWidthPercent / 100
         let bh = patternSize.height * dynamicHeightPercent / 100
-        guard bw >= moduleCount else {
-            throw LayoutError.dynamicWidthTooSmall(drawableWidthPx: bw, moduleCount: moduleCount)
-        }
         let a = (patternSize.width - bw) / 2
         let b = a + bw
         let c = (patternSize.height - bh) / 2
         let d = c + bh
         let patternDynamic = RectPx(x0: a, y0: c, x1: b, y1: d)
 
-        // Integer module boundaries in pre-rotation coordinates.
-        var moduleRects: [RectPx] = []
-        moduleRects.reserveCapacity(moduleCount)
-        for index in 0..<moduleCount {
-            let x0 = a + index * (b - a) / moduleCount
-            let x1 = a + (index + 1) * (b - a) / moduleCount
-            let preRotation = RectPx(x0: x0, y0: c, x1: x1, y1: d)
-            moduleRects.append(PatternRotation.rect(preRotation, degrees: rotationDeg, patternSize: patternSize))
+        let slots = try slotRects(geometryProfile: geometryProfile, dynamicRect: patternDynamic,
+                                  rotationDeg: rotationDeg, patternSize: patternSize)
+        let moduleRects = Array(slots.prefix(moduleCount))
+        let padding = (moduleCount..<slots.count).map { index in
+            PaddingPlacement(slotIndex: index, rectPx: slots[index],
+                             level: (index - moduleCount) % 2 == 0 ? levels.low : levels.high)
         }
 
         // Static markers live in the top and bottom margins; the margins above
@@ -222,14 +299,48 @@ public enum LayoutBuilder {
 
         return LayoutSpec(
             layoutID: layoutID,
-            profile: profile,
+            geometryProfile: geometryProfile,
             drawableSize: drawable,
             patternSize: patternSize,
             patternRotationDeg: rotationDeg,
             levels: levels,
             dynamicRectPx: PatternRotation.rect(patternDynamic, degrees: rotationDeg, patternSize: patternSize),
             modules: moduleRects,
+            padding: padding,
             markers: markers
         )
     }
+
+    /// Placement arithmetic separated from the App's fixed ROI and markers.
+    /// The common placement fixture supplies its own logical canvas and ROI.
+    static func slotRects(
+        geometryProfile: GeometryProfile,
+        dynamicRect: RectPx,
+        rotationDeg: Int,
+        patternSize: PixelSize
+    ) throws -> [RectPx] {
+        guard PatternRotation.isSupported(rotationDeg) else {
+            throw LayoutError.unsupportedRotation(rotationDeg)
+        }
+        let rows = geometryProfile.rows
+        let cols = geometryProfile.columns
+        guard dynamicRect.width >= cols else {
+            throw LayoutError.dynamicWidthTooSmall(drawableWidthPx: dynamicRect.width, moduleCount: cols)
+        }
+        guard dynamicRect.height >= rows else {
+            throw LayoutError.dynamicHeightTooSmall(drawableHeightPx: dynamicRect.height, rows: rows)
+        }
+        return (0..<(rows * cols)).map { index in
+            let row = index / cols
+            let column = index % cols
+            let rect = RectPx(
+                x0: dynamicRect.x0 + column * dynamicRect.width / cols,
+                y0: dynamicRect.y0 + row * dynamicRect.height / rows,
+                x1: dynamicRect.x0 + (column + 1) * dynamicRect.width / cols,
+                y1: dynamicRect.y0 + (row + 1) * dynamicRect.height / rows
+            )
+            return PatternRotation.rect(rect, degrees: rotationDeg, patternSize: patternSize)
+        }
+    }
+
 }

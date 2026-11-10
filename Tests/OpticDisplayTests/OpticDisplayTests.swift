@@ -213,6 +213,68 @@ final class OffscreenRenderTests: XCTestCase {
         XCTAssertEqual(code(box.x0 - marker.quietZonePx + 1, box.y0 - marker.quietZonePx + 1), 255)
         XCTAssertEqual(code(box.x0 + 1, box.y0 + 1), 0)
     }
+    func testMacGridPixelsAndCalibrationAcrossFourRotations() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
+        let renderer = try MetalRenderer(device: device)
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let fixture = try JSONParser.parse(Data(contentsOf: root.appendingPathComponent("docs/cw/fixtures/cr-001-layouts.json")))
+        let oracles = try XCTUnwrap(fixture["placement_oracles"]?.arrayValue)
+        for geometry in [GeometryProfile.f68G6x12, .c52G5x12] {
+            let oracle = try XCTUnwrap(oracles.first { $0["geometry_profile"]?.stringValue == geometry.rawValue })
+            let expectedCodes = try XCTUnwrap(oracle["slot_codes"]?.arrayValue).compactMap { $0.intValue.map(UInt8.init) }
+            for angle in [0, 90, 180, 270] {
+                let size = PixelSize(width: 259, height: 257)
+                let layout = try LayoutBuilder.make(layoutID: "gpu", geometryProfile: geometry,
+                                                     drawable: size, rotationDeg: angle)
+                let rects = layout.modules + layout.padding.map(\.rectPx)
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: .bgra8Unorm, width: size.width, height: size.height, mipmapped: false)
+                descriptor.usage = [.renderTarget, .shaderRead]
+                descriptor.storageMode = .shared
+                let texture = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
+                func render(_ scene: Scene) throws -> [UInt8] {
+                    let buffer = try XCTUnwrap(renderer.makeCommandBuffer(into: texture, scene: scene, text: nil))
+                    buffer.commit()
+                    buffer.waitUntilCompleted()
+                    XCTAssertNil(buffer.error)
+                    var pixels = [UInt8](repeating: 0, count: size.width*size.height*4)
+                    texture.getBytes(&pixels, bytesPerRow: size.width*4,
+                        from: MTLRegionMake2D(0, 0, size.width, size.height), mipmapLevel: 0)
+                    return pixels
+                }
+                func assertCode(_ pixels: [UInt8], _ x: Int, _ y: Int, _ value: UInt8) {
+                    let i = (y*size.width+x)*4
+                    XCTAssertEqual(Array(pixels[i..<i+4]), [value, value, value, 255],
+                                   "\(geometry) r\(angle) (\(x),\(y))")
+                }
+                let dynamic = try render(SceneBuilder.dynamicScene(layout,
+                    bits: PatternEncoder.encode(RenderSeq(1), profile: geometry.layoutProfile)))
+                for (index, rect) in rects.enumerated() {
+                    for (x,y) in [(rect.x0,rect.y0),(rect.x1-1,rect.y1-1),
+                                  (rect.x0+rect.width/2,rect.y0+rect.height/2)] {
+                        assertCode(dynamic, x, y, expectedCodes[index])
+                    }
+                }
+                for flip in [false, true] {
+                    let pixels = try render(SceneBuilder.calibrationScene(layout, .complementary(flip: flip)))
+                    for (index, rect) in rects.enumerated() {
+                        assertCode(pixels, rect.x0+rect.width/2, rect.y0+rect.height/2,
+                                   (index%2 == 0) != flip ? 224 : 32)
+                    }
+                }
+                let outlines = try render(SceneBuilder.calibrationScene(layout, .geometry(moduleCount: layout.modules.count)))
+                for rect in rects {
+                    assertCode(outlines, rect.x0, rect.y0, 255)
+                    assertCode(outlines, rect.x1-1, rect.y1-1, 255)
+                    assertCode(outlines, rect.x0+rect.width/2, rect.y0+rect.height/2, 0)
+                }
+                let card = try render(SceneBuilder.cardScene(layout))
+                for rect in rects { assertCode(card, rect.x0+rect.width/2, rect.y0+rect.height/2, 128) }
+            }
+        }
+    }
+
 }
 
 final class AppOptionsTests: XCTestCase {
@@ -229,6 +291,7 @@ final class AppOptionsTests: XCTestCase {
         XCTAssertEqual(options.outputDirectory?.path, "/tmp/lumaphase-smoke")
         XCTAssertEqual(options.profile, .m120S1)
         XCTAssertEqual(options.layoutProfile, .c52)
+        XCTAssertEqual(options.geometryProfile, .c52)
         XCTAssertEqual(options.rotationDeg, 90)
         XCTAssertEqual(options.runningSeconds, 5)
         XCTAssertGreaterThan(options.smokePhases.running, 3)
@@ -247,8 +310,18 @@ final class AppOptionsTests: XCTestCase {
         XCTAssertFalse(defaults.smoke)
         XCTAssertEqual(defaults.profile, .m59S1)
         XCTAssertEqual(defaults.layoutProfile, .f68)
+        XCTAssertEqual(defaults.geometryProfile, .f68G6x12)
         XCTAssertEqual(defaults.rotationDeg, 0)
         let help = try AppOptions.parse(arguments: ["Lumaphase", "--help"])
         XCTAssertTrue(help.showHelp)
     }
+    func testMacGridCLISelection() throws {
+        for geometry in GeometryProfile.macOSCases {
+            let options = try AppOptions.parse(arguments: ["Lumaphase", "--layout", geometry.rawValue])
+            XCTAssertEqual(options.geometryProfile, geometry)
+            XCTAssertEqual(options.layoutProfile, geometry.layoutProfile)
+        }
+        XCTAssertThrowsError(try AppOptions.parse(arguments: ["Lumaphase", "--layout", "F68-G9x8"]))
+    }
+
 }

@@ -114,7 +114,9 @@ def validate(directory, allow_incomplete):
     configuration = load_jsonl(directory / "configuration_events.jsonl")
 
     # ---- manifest ----
-    check(manifest.get("schema_version") == "1.0", "schema_version")
+    schema = manifest.get("schema_version")
+    check(schema in ("1.0", "1.1"), "schema_version")
+    check(layouts.get("schema_version") == schema, "layout schema matches manifest")
     check(manifest.get("protocol_version") == "OPTC-1", "protocol_version")
     session_id = manifest.get("session_id", "")
     check(re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", session_id) is not None,
@@ -187,22 +189,68 @@ def validate(directory, allow_incomplete):
         check(layout.get("dynamic_rect_px") == expected_dynamic,
               f"dynamic_rect_px mismatch: {layout.get('dynamic_rect_px')} != {expected_dynamic}")
 
+        shapes = {"F68": ("F68", 1, 68), "C52": ("C52", 1, 52),
+                  "F68-G6x12": ("F68", 6, 12), "C52-G5x12": ("C52", 5, 12),
+                  "F68-G9x8": ("F68", 9, 8), "C52-G9x6": ("C52", 9, 6)}
+        extension = {"geometry_profile", "grid_rows", "grid_cols", "module_count",
+                     "padding_count", "module_order", "sampling_inner_fraction", "padding"}
+        present = extension.intersection(layout)
+        if schema == "1.0" and not present:
+            geometry, rows, cols, padding = profile, 1, module_count, []
+        else:
+            check(present == extension, "complete layout extension required")
+            geometry = layout.get("geometry_profile")
+            check(geometry in shapes, "unknown geometry_profile")
+            if present != extension or geometry not in shapes:
+                continue
+            payload, rows, cols = shapes[geometry]
+            check(profile == payload, "geometry/layout_profile mismatch")
+            for field, value in (("grid_rows", rows), ("grid_cols", cols),
+                                 ("module_count", module_count),
+                                 ("padding_count", rows * cols - module_count)):
+                check(type(layout.get(field)) is int and layout[field] == value, f"{field} mismatch/type")
+            check(layout.get("module_order") == "row-major", "module_order")
+            check(type(layout.get("sampling_inner_fraction")) in (int, float)
+                  and layout["sampling_inner_fraction"] == 0.6, "sampling_inner_fraction")
+            padding = layout["padding"]
+        check(type(layout.get("level_low")) is int and type(layout.get("level_high")) is int
+              and 0 <= layout["level_low"] < layout["level_high"] <= 255, "L/H code values")
+        check(bw >= cols and bh >= rows, "nonzero grid cell size")
+
+        def expected_slot(index):
+            row, col = divmod(index, cols)
+            return rotate_rect([a + col * bw // cols, c + row * bh // rows,
+                                a + (col + 1) * bw // cols, c + (row + 1) * bh // rows],
+                               rotation, w_p, h_p)
+
         modules = layout.get("modules")
         check(isinstance(modules, list) and len(modules) == module_count, "module count")
+        if not isinstance(modules, list):
+            continue
         for index, module in enumerate(modules):
             module = obj(module, "module")
-            check(module.get("index") == index, "module index order")
+            check(type(module.get("index")) is int and module["index"] == index, "module index order/type")
             rect = module.get("rect_px")
-            check(isinstance(rect, list) and len(rect) == 4 and all(isinstance(v, int) for v in rect),
+            check(isinstance(rect, list) and len(rect) == 4 and all(type(v) is int for v in rect),
                   "module rect_px type")
-            expected = rotate_rect([a + index * bw // module_count, c,
-                                    a + (index + 1) * bw // module_count, c + bh], rotation, w_p, h_p)
+            expected = expected_slot(index)
             check(rect == expected, f"module {index} rect mismatch: {rect} != {expected}")
             check(inside(rect, expected_dynamic), f"module {index} outside dynamic rect")
             if index:
                 previous = modules[index - 1]["rect_px"]
                 check(not intersects(rect, previous), f"module {index} overlaps previous")
-        check(layout.get("level_low") == 32 and layout.get("level_high") == 224, "L/H defaults")
+        check(isinstance(padding, list) and len(padding) == rows * cols - module_count, "padding count")
+        for offset, item in enumerate(padding if isinstance(padding, list) else []):
+            item = obj(item, "padding")
+            slot = module_count + offset
+            check(type(item.get("slot_index")) is int and item["slot_index"] == slot, "padding slot order")
+            check(item.get("role") == "padding", "padding role")
+            level = layout.get("level_low") if offset % 2 == 0 else layout.get("level_high")
+            check(type(item.get("level")) is int and item["level"] == level, "padding actual level")
+            rect = item.get("rect_px")
+            check(isinstance(rect, list) and len(rect) == 4 and all(type(v) is int for v in rect),
+                  "padding rect type")
+            check(rect == expected_slot(slot), "padding placement")
 
         markers = layout.get("markers")
         check(isinstance(markers, list) and len(markers) == 4, "marker count")
@@ -372,7 +420,7 @@ def validate(directory, allow_incomplete):
     check(isinstance(close.get("pending_frame_count"), int), "pending_frame_count")
 
     # ---- display_profile ----
-    check(profiles.get("schema_version") == "1.0", "display_profile schema")
+    check(profiles.get("schema_version") == schema, "display_profile schema matches manifest")
     check(isinstance(profiles.get("profiles"), list), "display_profile.profiles")
     bindings = profiles.get("segment_bindings")
     check(isinstance(bindings, list) and len(bindings) == len(segments), "one binding per segment")
@@ -385,6 +433,19 @@ def validate(directory, allow_incomplete):
         if binding.get("status") == "MISSING":
             check(binding.get("profile_id") is None, "MISSING binding must not reference a profile")
     known_profiles = {profile.get("profile_id") for profile in profiles.get("profiles", [])}
+    profile_by_id = {profile.get("profile_id"): profile for profile in profiles.get("profiles", [])}
+    segment_by_id = {segment["segment_id"]: segment for segment in segments}
+    for binding in bindings or []:
+        if binding.get("status") != "COMPATIBLE":
+            continue
+        key = profile_by_id.get(binding.get("profile_id"), {}).get("calibration_key", {})
+        segment = segment_by_id.get(binding.get("segment_id"), {})
+        layout = layout_by_id.get(segment.get("layout_id"), {})
+        if schema == "1.1":
+            check(key.get("geometry_profile") == layout.get("geometry_profile"),
+                  "COMPATIBLE requires a verified geometry key")
+        check(key.get("pixel_format") not in (None, "UNKNOWN")
+              and segment.get("pixel_format") != "UNKNOWN", "UNKNOWN pixel format cannot be COMPATIBLE")
     for binding in bindings or []:
         if binding.get("profile_id") is not None:
             check(binding["profile_id"] in known_profiles, "binding references an unexported profile")

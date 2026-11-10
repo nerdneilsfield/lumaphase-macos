@@ -11,6 +11,7 @@ public struct CalibrationKey: Equatable {
     public var drawableHeightPx: Int?
     public var displayRotationDeg: Int?
     public var patternRotationDeg: Int?
+    public var geometryProfile: String?
     public var brightnessSetting: Double?
     public var colorSpace: String?
     public var pixelFormat: String?
@@ -28,6 +29,7 @@ public struct CalibrationKey: Equatable {
         drawableHeightPx: Int? = nil,
         displayRotationDeg: Int? = nil,
         patternRotationDeg: Int? = nil,
+        geometryProfile: String? = nil,
         brightnessSetting: Double? = nil,
         colorSpace: String? = nil,
         pixelFormat: String? = nil,
@@ -43,6 +45,7 @@ public struct CalibrationKey: Equatable {
         self.drawableHeightPx = drawableHeightPx
         self.displayRotationDeg = displayRotationDeg
         self.patternRotationDeg = patternRotationDeg
+        self.geometryProfile = geometryProfile
         self.brightnessSetting = brightnessSetting
         self.colorSpace = colorSpace
         self.pixelFormat = pixelFormat
@@ -65,6 +68,7 @@ public struct CalibrationKey: Equatable {
             drawableHeightPx: json["drawable_height_px"]?.intValue.map(Int.init),
             displayRotationDeg: json["display_rotation_deg"]?.intValue.map(Int.init),
             patternRotationDeg: json["pattern_rotation_deg"]?.intValue.map(Int.init),
+            geometryProfile: json["geometry_profile"]?.stringValue,
             brightnessSetting: json["brightness_setting"]?.doubleValue,
             colorSpace: json["color_space"]?.stringValue,
             pixelFormat: json["pixel_format"]?.stringValue,
@@ -76,7 +80,7 @@ public struct CalibrationKey: Equatable {
     }
 
     public func json() -> JSONValue {
-        .object([
+        var fields: [String: JSONValue] = [
             "source_device_id": sourceDeviceID.map(JSONValue.string) ?? .null,
             "os_build": osBuild.map(JSONValue.string) ?? .null,
             "display_mode_id": displayModeID.map(JSONValue.string) ?? .null,
@@ -91,7 +95,9 @@ public struct CalibrationKey: Equatable {
             "dimming_mode": dimmingMode.map(JSONValue.string) ?? .null,
             "calibration_version": .string(calibrationVersion),
             "calibration_note": calibrationNote.map(JSONValue.string) ?? .null
-        ])
+        ]
+        if let geometryProfile { fields["geometry_profile"] = .string(geometryProfile) }
+        return .object(fields)
     }
 }
 
@@ -185,9 +191,11 @@ public enum CalibrationMatcher {
         compare("drawable_height_px", key.drawableHeightPx, segment.drawableHeightPx)
         compare("display_rotation_deg", key.displayRotationDeg, segment.displayRotationDeg)
         compare("pattern_rotation_deg", key.patternRotationDeg, layout.patternRotationDeg)
+        compare("geometry_profile", key.geometryProfile, layout.geometryProfile.rawValue)
         compare("brightness_setting", key.brightnessSetting, segment.brightnessSetting)
         compare("color_space", key.colorSpace, segment.colorSpace)
-        compare("pixel_format", key.pixelFormat, segment.pixelFormat)
+        compare("pixel_format", key.pixelFormat == "UNKNOWN" ? nil : key.pixelFormat,
+                segment.pixelFormat == "UNKNOWN" ? nil : segment.pixelFormat)
         compare("color_mode", key.colorMode, segment.colorMode)
         compare("dimming_mode", key.dimmingMode, segment.dimmingMode)
 
@@ -215,7 +223,7 @@ public struct DisplayProfileDocument {
 
     public func json() -> JSONValue {
         .object([
-            "schema_version": .string("1.0"),
+            "schema_version": .string("1.1"),
             "profiles": .array(profiles.map { $0.json() }),
             "segment_bindings": .array(bindings.map { $0.json() })
         ])

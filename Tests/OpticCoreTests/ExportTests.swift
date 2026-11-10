@@ -50,6 +50,7 @@ final class ExportTests: XCTestCase {
                     drawableHeightPx: 2234,
                     displayRotationDeg: 0,
                     patternRotationDeg: 0,
+                    geometryProfile: "F68",
                     brightnessSetting: 0.5,
                     colorSpace: "kCGColorSpaceSRGB",
                     pixelFormat: "BGRA8Unorm",
@@ -87,14 +88,14 @@ final class ExportTests: XCTestCase {
 
     /// Builds a short synthetic session with two segments, a cross-segment late
     /// result, one invalid-then-presented frame and one never-confirmed frame.
-    private func runSyntheticSession(_ session: Session, includeProfile: Bool) throws {
+    private func runSyntheticSession(_ session: Session, includeProfile: Bool, grid: Bool = false) throws {
         let package = session.package
         let clock = session.clock
         let writer = package.eventWriter
 
-        let layout0 = try LayoutBuilder.make(layoutID: "layout-0", profile: .f68,
+        let layout0 = try LayoutBuilder.make(layoutID: "layout-0", geometryProfile: grid ? .f68G6x12 : .f68,
                                              drawable: PixelSize(width: 3456, height: 2234), rotationDeg: 0)
-        let layout1 = try LayoutBuilder.make(layoutID: "layout-1", profile: .c52,
+        let layout1 = try LayoutBuilder.make(layoutID: "layout-1", geometryProfile: grid ? .c52G5x12 : .c52,
                                              drawable: PixelSize(width: 1512, height: 982), rotationDeg: 0)
         try package.addLayout(layout0)
         try package.addLayout(layout1)
@@ -229,7 +230,7 @@ final class ExportTests: XCTestCase {
 
         // manifest
         let manifest = try JSONParser.parse(Data(contentsOf: directory.appendingPathComponent("manifest.json")))
-        XCTAssertEqual(manifest["schema_version"]?.stringValue, "1.0")
+        XCTAssertEqual(manifest["schema_version"]?.stringValue, "1.1")
         XCTAssertEqual(manifest["protocol_version"]?.stringValue, "OPTC-1")
         XCTAssertEqual(manifest["platform"]?.stringValue, "MACOS")
         XCTAssertEqual(manifest["clock_domain"]?.stringValue, "MACOS_HOST_TIME")
@@ -254,7 +255,7 @@ final class ExportTests: XCTestCase {
 
         // layout collection keeps both referenced layouts.
         let layouts = try JSONParser.parse(Data(contentsOf: directory.appendingPathComponent("layout.json")))
-        XCTAssertEqual(layouts["schema_version"]?.stringValue, "1.0")
+        XCTAssertEqual(layouts["schema_version"]?.stringValue, "1.1")
         let layoutList = try XCTUnwrap(layouts["layouts"]?.arrayValue)
         XCTAssertEqual(layoutList.compactMap { $0["layout_id"]?.stringValue }, ["layout-0", "layout-1"])
         XCTAssertEqual(layoutList[0]["modules"]?.arrayValue?.count, 68)
@@ -433,7 +434,7 @@ final class ExportTests: XCTestCase {
         XCTAssertEqual(bindings.map { $0["status"]?.stringValue }, ["COMPATIBLE", "INCOMPATIBLE"])
         // Second segment has a different drawable size than the imported key.
         XCTAssertEqual(bindings[1]["mismatch_fields"]?.arrayValue?.compactMap { $0.stringValue },
-                       ["display_mode_id", "drawable_height_px", "drawable_width_px"])
+                       ["display_mode_id", "drawable_height_px", "drawable_width_px", "geometry_profile"])
     }
 
     func testCalibrationMatcherUnknownFieldsAreUnverified() throws {
@@ -444,7 +445,7 @@ final class ExportTests: XCTestCase {
         let complete = CalibrationKey(
             sourceDeviceID: "Mac16,5-test", osBuild: "23A344", displayModeID: "mode-3456x2234",
             drawableWidthPx: 3456, drawableHeightPx: 2234, displayRotationDeg: 0,
-            patternRotationDeg: 0, brightnessSetting: 0.5, colorSpace: "kCGColorSpaceSRGB",
+            patternRotationDeg: 0, geometryProfile: "F68", brightnessSetting: 0.5, colorSpace: "kCGColorSpaceSRGB",
             pixelFormat: "BGRA8Unorm", colorMode: "sRGB", dimmingMode: "fixed",
             calibrationVersion: "v1"
         )
@@ -551,4 +552,54 @@ final class ExportTests: XCTestCase {
             try JSONParser.parse(String($0))
         }
     }
+    func testGridExportPreservesOldLayoutsAndLateFrameIdentity() throws {
+        // Persist this synthetic recording for the independent JSON checker.
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lumaphase-cr001-export-\(UUID().uuidString)")
+        let session = try makeSession(root: root)
+        try runSyntheticSession(session, includeProfile: false, grid: true)
+        let directory = session.package.directory
+        let layouts = try JSONParser.parse(Data(contentsOf: directory.appendingPathComponent("layout.json")))
+        XCTAssertEqual(layouts["schema_version"]?.stringValue, "1.1")
+        let entries = try XCTUnwrap(layouts["layouts"]?.arrayValue)
+        XCTAssertEqual(entries.map { $0["geometry_profile"]?.stringValue }, ["F68-G6x12", "C52-G5x12"])
+        XCTAssertEqual(entries.map { $0["padding"]?.arrayValue?.count }, [4, 8])
+        XCTAssertEqual(entries[0]["modules"]?.arrayValue?.count, 68)
+        XCTAssertEqual(entries[1]["modules"]?.arrayValue?.count, 52)
+        XCTAssertEqual(entries[0]["padding"]?.arrayValue?.map { $0["level"]?.intValue }, [32, 224, 32, 224])
+        XCTAssertEqual(session.package.registeredSegments.map(\.layoutID), ["layout-0", "layout-1"])
+        print("CR001 synthetic export: \(directory.path)")
+    }
+
+    func testLegacyCalibrationGeometryAndUnknownPixelFormat() throws {
+        let layout = try LayoutBuilder.make(layoutID: "grid", geometryProfile: .f68G6x12,
+                                           drawable: PixelSize(width: 3456, height: 2234), rotationDeg: 0)
+        let segment = SegmentConfig(segmentID: .zero, layoutID: "grid", experimentProfile: .m59S1,
+                                    snapshot: snapshot(width: 3456, height: 2234))
+        // Same shape as an existing 1.0 import: the geometry key did not exist.
+        let oldKey = CalibrationKey(sourceDeviceID: "Mac16,5-test", osBuild: "23A344",
+            displayModeID: "mode-3456x2234", drawableWidthPx: 3456, drawableHeightPx: 2234,
+            displayRotationDeg: 0, patternRotationDeg: 0, brightnessSetting: 0.5,
+            colorSpace: "kCGColorSpaceSRGB", pixelFormat: "BGRA8Unorm", colorMode: "sRGB",
+            dimmingMode: "fixed", calibrationVersion: "1.0")
+        var key = try CalibrationKey(json: JSONParser.parse(oldKey.json().serialized()))
+        XCTAssertNil(key.geometryProfile)
+        func binding(_ key: CalibrationKey) -> SegmentProfileBinding {
+            CalibrationMatcher.binding(segment: segment, layout: layout,
+                profile: ImportedCalibrationProfile(profileID: "legacy", key: key,
+                    model: .object(["tau": .array([.int(0)])])),
+                sourceDeviceID: "Mac16,5-test", osBuild: "23A344")
+        }
+        XCTAssertEqual(binding(key).status, .importedUnverified)
+        XCTAssertEqual(binding(key).mismatchFields, ["geometry_profile"])
+        key.geometryProfile = "F68"
+        XCTAssertEqual(binding(key).status, .incompatible)
+        XCTAssertEqual(binding(key).mismatchFields, ["geometry_profile"])
+        key.geometryProfile = "F68-G6x12"
+        XCTAssertEqual(binding(key).status, .compatible)
+        key.pixelFormat = "UNKNOWN"
+        XCTAssertEqual(binding(key).status, .importedUnverified)
+        XCTAssertEqual(binding(key).mismatchFields, ["pixel_format"])
+    }
+
 }

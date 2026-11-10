@@ -32,7 +32,7 @@ public struct SessionManifest {
         presentationDrainTimeoutNanoseconds: Int64 = SessionClockDomain.presentationDrainTimeoutNanoseconds,
         segments: [SegmentConfig] = []
     ) {
-        self.schemaVersion = "1.0"
+        self.schemaVersion = "1.1"
         self.protocolVersion = "OPTC-1"
         self.sessionID = sessionID
         self.platform = platform

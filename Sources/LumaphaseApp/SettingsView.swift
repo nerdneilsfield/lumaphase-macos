@@ -9,12 +9,11 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header
                 Group {
-                    experimentSection
+                    experimentSection.disabled(controller.isBusy)
                     patternSection
-                    timelineSection
-                    calibrationSection
+                    timelineSection.disabled(controller.isBusy)
+                    calibrationSection.disabled(controller.isBusy)
                 }
-                .disabled(controller.isBusy)
                 displaySection
                 actions
                 statusSection
@@ -75,18 +74,21 @@ struct SettingsView: View {
         GroupBox("图案与几何") {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 18) {
-                    Picker("布局", selection: $controller.layoutProfile) {
-                        ForEach(LayoutProfile.allCases, id: \.rawValue) { profile in
+                    Picker("布局", selection: Binding(get: { controller.geometryProfile },
+                                                       set: { controller.changeGeometry($0) })) {
+                        ForEach(GeometryProfile.macOSCases, id: \.rawValue) { profile in
                             Text(profile.rawValue).tag(profile)
                         }
                     }
-                    .frame(width: 150)
+                    .frame(width: 180)
+                    .disabled(!controller.canChangeGeometry)
                     Picker("图案旋转", selection: $controller.rotationDeg) {
                         ForEach([0, 90, 180, 270], id: \.self) { degrees in
                             Text("\(degrees)°").tag(degrees)
                         }
                     }
                     .frame(width: 150)
+                    .disabled(controller.isBusy)
                 }
                 HStack(spacing: 18) {
                     Stepper("L = \(controller.lowLevel)", value: $controller.lowLevel, in: 0...255)
@@ -94,12 +96,14 @@ struct SettingsView: View {
                     Text("8-bit SDR 码值，默认 32/224")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                .disabled(controller.isBusy)
                 HStack {
                     Toggle("窗口模式（不进入全屏）", isOn: $controller.windowed)
                     Spacer()
                     Text("ArUco DICT_4X4_50 ID 0–3，OpenCV 4.10.0 固定字节")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                .disabled(controller.isBusy)
             }
             .padding(6)
         }

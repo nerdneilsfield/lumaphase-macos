@@ -1,11 +1,11 @@
 # OPTC-1 显示端共享数据契约
 
-状态：v1.0，Android 与 macOS 双方确认，尚未发布；2026-11-10 按协调者意见澄清恢复提交、时间来源、实验会话及迟到结果。
+状态：v1.1，2026-11-10 按三端协调决定加入 CR-001 网格布局；新会话使用 schema 1.1，继续读取已发布的 1.0 单排会话。本文为待协调者字节同步的正文。
 
 日期：2026-11-10。
-范围：光学编码、布局、会话标识、显示日志和导出文件。本轮只制定文档，不实现应用。
+范围：光学编码、布局、会话标识、显示日志和导出文件。本轮修订契约与共同 fixture，不修改应用代码。
 
-原设计第三份报告第 2 节定义 `OPTC-1` 光学编码。本契约补充文件与事件语义，不改变编码。本文中的“必须”表示互操作所需的约束。`schema_version` 固定为 `"1.0"`，与光学协议名 `"OPTC-1"` 分开。双方仓库保存字节一致的本契约；平台实现说明分别维护。
+原设计第三份报告第 2 节定义 `OPTC-1` 光学编码。本契约补充文件与事件语义，不改变编码。本文中的“必须”表示互操作所需的约束。新会话的 `manifest.json`、`layout.json`、`display_profile.json` 中已有的 `schema_version` 统一为 `"1.1"`；事件行不新增版本字段，原六文件保持不变。光学协议名仍为 `"OPTC-1"`，与文件 schema、CR-001 需求文档版本分开。三端仓库保存字节一致的本契约与共同 fixture；平台实现说明分别维护。1.0 读取规则见第 3.5 节。
 
 ## 1. 编码和数值类型
 
@@ -21,7 +21,7 @@ CRC：width=8, poly=0x07, init=0, refin=false, refout=false, xorout=0
 0 → [L,H]；1 → [H,L]；默认 L=32，H=224
 ```
 
-模块按逻辑图案的 +x 方向排列；Gray 与 CRC 都是最高位先显示。F68 的 0–3 为 `[L,H,H,L]`，4–35 为 Gray，36–51 为 CRC，52–67 为 Runner。Runner 按索引 0 到 7 排列，只有 `n mod 8` 对应的位为 1。C52 保留模块 0–51。每个横截面沿逻辑 +y 方向重复。
+模块编码数组顺序不随几何变化；Gray 与 CRC 都是最高位先显示。F68 的 0–3 为 `[L,H,H,L]`，4–35 为 Gray，36–51 为 CRC，52–67 为 Runner。Runner 按索引 0 到 7 排列，只有 `n mod 8` 对应的位为 1。C52 保留模块 0–51。原单排沿逻辑 +x 排列并沿 +y 重复；网格按第 3.3 节将同一数组逐行放置，不改编码或增加载荷。
 
 文件中的类型统一如下。
 
@@ -58,7 +58,7 @@ JSON 使用 UTF-8。JSONL 每行是一个完整对象，以 LF 结束。导出�
 
 | 键 | 类型 | 含义 |
 | --- | --- | --- |
-| `schema_version` | 字符串 | 固定 `"1.0"` |
+| `schema_version` | 字符串 | 新会话固定 `"1.1"`；读取器保留 `"1.0"` 支持 |
 | `protocol_version` | 字符串 | 固定 `"OPTC-1"` |
 | `session_id` | 字符串 | 会话 UUID |
 | `platform` | 字符串 | `MACOS` 或 `ANDROID` |
@@ -91,7 +91,7 @@ JSON 使用 UTF-8。JSONL 每行是一个完整对象，以 LF 结束。导出�
 | `brightness_source` | 字符串 | `SYSTEM_REPORTED`、`OPERATOR_REPORTED` 或 `UNKNOWN`；UNKNOWN 时设置值为空 |
 | `auto_brightness_enabled` | 布尔或 `null` | 是否启用自动亮度；未知为空 |
 | `color_space` | 字符串 | 渲染表面的实际色彩空间名称 |
-| `pixel_format` | 字符串 | 渲染目标像素格式的原生名称 |
+| `pixel_format` | 字符串 | 实际渲染配置的原生名称或平台限定的确定性描述；未知为 `UNKNOWN`，规则见下文 |
 | `color_mode` | 字符串或 `null` | 当前显示色彩模式的原生名称 |
 | `dimming_mode` | 字符串或 `null` | 当前调光模式的原生名称 |
 | `hdr_enabled`、`true_tone_enabled`、`night_shift_enabled` | 布尔或 `null` | 当前功能状态；不适用或无法取得时为空 |
@@ -99,6 +99,8 @@ JSON 使用 UTF-8。JSONL 每行是一个完整对象，以 LF 结束。导出�
 | `operator_note` | 字符串 | 人工记录，默认空字符串 |
 
 `pattern_rotation_deg`、`layout_profile` 和 L/H 从 `layout_id` 引用的布局取得，段对象不另存同义字段。标称刷新率无法精确取得时使用 `null`，不能用请求值冒充实测值。Mac 的 59.94 Hz 配置可用 `requested_refresh_num=60000`、`requested_refresh_den=1001` 记录选择；系统报告值和确认呈现间隔分别保存。平台特有的其他设置放在可选 `platform_configuration` 对象中，不替换上述键名。
+
+`pixel_format` 是不透明比较值，必须来自实际渲染配置，不能以请求值代替实际值，不能跨 API 擅自归一化。Mac 保留实际 Metal 格式名称，例如当前 `BGRA8Unorm`。Android 允许实际 EGLConfig 属性构成的描述，例如 `EGL_CONFIG(R=8,G=8,B=8,A=8,BUFFER_SIZE=32)`；属性顺序和十进制格式固定为该示例顺序，数值分别来自 EGL_RED_SIZE、EGL_GREEN_SIZE、EGL_BLUE_SIZE、EGL_ALPHA_SIZE、EGL_BUFFER_SIZE 的成功查询。不能以 GL_RGBA8 纹理内部格式冒充 EGL surface 的配置。平台可在 `platform_configuration` 保留原始属性和查询诊断。无法确认时写 `UNKNOWN` 并保留诊断；`UNKNOWN` 相等不构成标定兼容证据。1.0 已有的实际格式描述按原值保留，读取器不改写旧记录。
 
 每次模式、drawable 尺寸、布局、旋转、亮度或色彩配置变化都结束当前段；恢复显示时创建新段。旧段的布局和配置必须保留。不能把新 Surface 尺寸写回旧段。`layout.json` 是布局集合，`manifest.segments[].layout_id` 引用其中一个不可变对象；相同布局可以复用同一个对象。
 
@@ -132,7 +134,14 @@ JSON 使用 UTF-8。JSONL 每行是一个完整对象，以 LF 结束。导出�
 | 字段 | 含义 |
 | --- | --- |
 | `layout_id` | 布局对象的不可变身份；会话内唯一 |
-| `layout_profile` | `F68` 或 `C52` |
+| `layout_profile` | 载荷族，`F68` 或 `C52`；不是网格几何名 |
+| `geometry_profile` | 唯一几何判别字段，第 3.3 节定义的字符串；不并存同义 `grid_profile` 或 `layout_kind` |
+| `grid_rows`、`grid_cols` | 旋转前逻辑行、列数，正整数；列数为偶数 |
+| `module_count` | 原协议数据模块数量，整数 68 或 52，与 layout_profile 一致 |
+| `padding_count` | 非负偶数，等于 grid_rows × grid_cols − module_count |
+| `module_order` | 固定字符串 `row-major` |
+| `sampling_inner_fraction` | 数值，固定 0.6；网格中央宽、高比例，单排采样规则见第 3.4 节 |
+| `padding` | 独立填充对象数组；字段和顺序见第 3.3 节，无填充为 `[]` |
 | `drawable_width_px`、`drawable_height_px` | 实际绘制目标尺寸，正整数 |
 | `coordinate_system` | 固定为 `DRAWABLE_TOP_LEFT_PIXEL_EDGES` |
 | `pattern_rotation_deg` | 逻辑图案到输出坐标的顺时针旋转：0、90、180 或 270 |
@@ -143,7 +152,7 @@ JSON 使用 UTF-8。JSONL 每行是一个完整对象，以 LF 结束。导出�
 | `markers` | 第 4 节的定位标记对象 |
 | `level_low`、`level_high` | 8 位 SDR 码值，默认 32、224 |
 
-`layout.json` 的外层为 `{"schema_version":"1.0","layouts":[...]}`。布局对象中的坐标已经完成旋转。读取端直接按 `rect_px` 取样，不再次应用旋转；矩阵用于解释方向和核对坐标。
+新 `layout.json` 的外层为 `{"schema_version":"1.1","layouts":[...]}`。布局对象中的坐标已经完成旋转。读取端直接按 `rect_px` 取样，不再次应用旋转；矩阵用于解释方向和核对坐标。`layout_id` 是不可变对象身份，不得把它作为几何名解析；选择相同 geometry_profile 的两个不同尺寸布局仍是不同对象。不新增 `dynamic_roi_px`、`module_rects_px`、`payload_id` 或 `coordinate_space` 等替代原键。
 
 ### 3.2 图案旋转和系统旋转分开
 
@@ -160,11 +169,36 @@ JSON 使用 UTF-8。JSONL 每行是一个完整对象，以 LF 结束。导出�
 
 `display_rotation_deg` 表示系统报告的相对自然方向的绘制补偿旋转标签，取 0、90、180、270；无法取得时为 `null`。Android 的 `Display.getRotation()` 返回值 `ROTATION_0/90/180/270` 直接映射为 0/90/180/270，它描述绘制补偿，与设备物理转动方向相反；该字段不表示设备物理转动的顺时针角度。平台原始旋转枚举保存于平台字段。该字段只描述设备显示配置，不再作用于已经导出的布局坐标。屏幕扫描方向由实测标定给出，不能从 `display_rotation_deg` 或手机竖屏状态推断。
 
-### 3.3 非整除宽度
+### 3.3 单排与网格的整数放置
 
-旋转前动态区 x 范围为 `[a,b)`，模块数为 M。第 i 条边界使用 `a + floor(i × (b-a)/M)`，i 为 0 到 M。每个模块因此具有整数边界，宽度最多相差 1 像素；动态区宽度小于 M 时不启动该布局。两端与后端均以实际导出的模块矩形为准，不以百分比重新计算。
+| geometry_profile | layout_profile | grid_rows × grid_cols | module_count / padding_count |
+| --- | --- | --- | --- |
+| `F68` | F68 | 1 × 68 | 68 / 0 |
+| `C52` | C52 | 1 × 52 | 52 / 0 |
+| `F68-G6x12` | F68 | 6 × 12 | 68 / 4 |
+| `C52-G5x12` | C52 | 5 × 12 | 52 / 8 |
+| `F68-G9x8` | F68 | 9 × 8 | 68 / 4 |
+| `C52-G9x6` | C52 | 9 × 6 | 52 / 2 |
 
-原设计的宽 96%、高 68% 是布局建议，不是后端的固定几何假设。静态标记和留白不得与动态区重叠。模块边缘不使用抗锯齿或线性插值。
+Mac 新默认 F68-G6x12，可选 C52-G5x12；Android 竖向使用 F68-G9x8/C52-G9x6，横向实际绘制矩形选择横向网格。F68/C52 原单排继续可选。可选实验 F68-G4x18 不在本版必需几何集合内，不能要求首批消费者支持。
+
+设旋转前动态区为 `[a,c,b,d)`、行数 R、列数 C、槽位 i，则 `r=i//C`、`k=i%C`。矩形为 `[a+floor(k*(b-a)/C), c+floor(r*(d-c)/R), a+floor((k+1)*(b-a)/C), c+floor((r+1)*(d-c)/R)]`，再按第 3.2 节变换到 drawable。动态区宽至少 C、高至少 R，否则不启动。格宽、格高各最多相差 1 像素，完整铺满动态区且无重叠。偶数列保证原编码互补对不跨逻辑行；旋转不重排槽位或模块 index。
+
+`modules` 恰好含 module_count 项，按原 `index=0…module_count-1` 连续排列，每项仍仅按原字段给出 index 和最终 rect_px。其余槽位按 slot_index 递增写入独立 `padding`，不得混入 modules。每项含整数 `slot_index`、字符串 `role="padding"`、最终 `rect_px` 和整数 `level`。slot_index 从 module_count 开始连续编号；level 从本布局 level_low 起，按 level_low、level_high 交替重复。level 是实际 8 位码值，不写 `"L"`/`"H"` 字符串。默认首填充示例为 `{"slot_index":68,"role":"padding","rect_px":[74,80,82,94],"level":32}`，对应第 11 节 fixture 的 F68-G6x12、0°。
+
+原设计宽 96%、高 68% 不是后端固定几何假设。CR-001 首批保持各平台原动态区与标记边界，不强求两平台原边界相同；扩大面积留待后续现场调整。消费者以导出矩形为准，不按百分比反推。静态标记和留白不得与动态区重叠。模块边缘不使用抗锯齿或线性插值。L/H 格数平衡不表示整数舍入后的像素面积严格相等。
+
+### 3.4 网格取样与过渡帧
+
+网格取单模块中央 60% 宽和高。模块矩形 `[x0,y0,x1,y1)` 的连续取样窗为 `[x0+0.2w,y0+0.2h,x0+0.8w,y0+0.8h)`；先保留连续屏幕坐标，再映射到原相机图像，不能先裁成整数 drawable 窗或丢失每格位置。padding 不参与 payload、CRC、过渡拟合或 P10 模块尺寸统计。显示端仍填满格子，sampling_inner_fraction 不缩小实际渲染区域。
+
+原 F68/C52 单排也写 sampling_inner_fraction=0.6，但消费者继续原单排采样路径，不能据此裁掉原纵向时序信息。geometry_profile 决定采样路径。稳定帧 CRC 与跨行 n−1/n 混合的 TRANSITION_FIT 分别处理；后者使用各采样位置及 tau(u,v)，不能把混合行硬拼为同一静态码字。缺实测标定不得生成精细光学时间；本契约不新增显示日志事件。
+
+### 3.5 1.0 与 1.1 读取规则
+
+1.0 文件若整组 `geometry_profile`、`grid_rows`、`grid_cols`、`module_count`、`padding_count`、`module_order`、`sampling_inner_fraction`、`padding` 均缺失，按 layout_profile 解释为原单排，保留其显式模块矩形及原采样行为。不能从 layout_id、屏幕方向或尺寸猜测网格。1.0 若显式带扩展，也必须完整且满足本节规则，不能允许半组字段。
+
+1.1 所有布局，包括单排，必须完整写上述扩展组。未知几何、缺字段、类型错误、profile 与行列/计数不符、模块或填充索引/顺序不符、填充 level 不符合本布局 L/H、矩形不符合整数放置和旋转结果，均拒绝该布局，不回退单排。level_low、level_high 为整数且满足 `0 ≤ level_low < level_high ≤ 255`。旧读取器不能据忽略新字段而宣称支持 1.1；新版读取器继续支持合法 1.0 会话。六文件和原日志字段/事件的含义保持不变。
 
 ## 4. ArUco 定位标记
 
@@ -304,9 +338,11 @@ Android 在支持 `eglPresentationTimeANDROID` 并调用它时，当前实现将
 
 `display_profile.json` 即使没有标定也存在，外层包含 `schema_version`、`profiles`、`segment_bindings`。缺失时 `profiles=[]`；每个 binding 包含 `segment_id`、`profile_id`（可空）、`status`、`mismatch_fields`。状态为 `MISSING`、`IMPORTED_UNVERIFIED`、`COMPATIBLE` 或 `INCOMPATIBLE`。文件存在不等于配置匹配，也不等于精度通过验收。
 
-每个导入 profile 包含 `profile_id`、`calibration_key` 和原始 `model` 对象。`calibration_key` 至少包括显示设备、系统构建、显示模式、drawable 尺寸、显示旋转、图案旋转、亮度、色彩与调光配置，以及标定版本。无法读取的配置项为 `null` 并记录人工备注；依赖这些未知项的匹配不能标为 `COMPATIBLE`。具体配置取值允许平台扩展，但相同字段名不能跨平台改变含义。
+每个导入 profile 包含 `profile_id`、`calibration_key` 和原始 `model` 对象。`calibration_key` 至少包括显示设备、系统构建、显示模式、drawable 尺寸、显示旋转、图案旋转、亮度、色彩与调光配置，以及标定版本。1.1 新标定键增加字符串 `geometry_profile`，与第 3 节几何名一致；1.0 旧键可缺失该字段。无法读取的配置项为 `null` 并记录人工备注；依赖这些未知项的匹配不能标为 `COMPATIBLE`。具体配置取值允许平台扩展，但相同字段名不能跨平台改变含义。
 
-应用只导入和保留标定，不负责从显示日志生成实测 `tau(x,y)`、亮暗响应或调制模型。后端屏幕模型的数值 schema 仍需识别算法端定稿；v1.0 将 `model` 视为不透明对象，不能声称已具备跨后端互换能力。标定键沿用第 2 节准确键名及布局的 `pattern_rotation_deg`；标定版本键为 `calibration_version`（字符串）。一个段绑定的标定不随新段替换，所有被引用的 profile 保留在导出包中。
+旧标定缺 geometry_profile 时，不得自动判为网格 COMPATIBLE；未知几何保持 IMPORTED_UNVERIFIED，已知模型要求与目标几何冲突时为 INCOMPATIBLE。纯屏幕坐标 tau 模型可由模型消费者显式验证跨布局适用性，缺此验证不能默认复用；不要求所有旧 profile 一律作废。不要用每会话变化的 layout_id 代替可复用几何键。
+
+应用只导入和保留标定，不负责从显示日志生成实测 `tau(x,y)`、亮暗响应或调制模型。后端屏幕模型的数值 schema 仍需识别算法端定稿；1.0 与 1.1 均将 `model` 视为不透明对象，不能声称已具备跨后端互换能力。标定键沿用第 2 节准确键名及布局的 `pattern_rotation_deg`；标定版本键为 `calibration_version`（字符串）。一个段绑定的标定不随新段替换，所有被引用的 profile 保留在导出包中。
 
 ## 10. 日志溢出和数据完整性
 
@@ -320,7 +356,7 @@ Android 在支持 `eglPresentationTimeANDROID` 并调用它时，当前实现将
 
 文件写入失败与日志队列溢出分开报告。若磁盘错误使事件或摘要无法写入，导出操作返回失败，不能提供一份声称完整的成功导出包。
 
-## 11. 双端互操作检查
+## 11. 三端互操作检查与共同 fixture
 
 本节是协议检查范围，不表示已经执行。
 
@@ -331,13 +367,21 @@ Android 在支持 `eglPresentationTimeANDROID` 并调用它时，当前实现将
 5. 分别检查渲染完成有效而呈现 pending、不支持实际呈现、查询失败、时钟域未确认、Surface 销毁、历史失效、封存时 pending 的记录。
 6. 检查缺失标定与日志溢出导出包，确认不生成虚假的标定或完整性结论。
 
+共同几何 fixture 为 [fixtures/cr-001-layouts.json](fixtures/cr-001-layouts.json)。它的 `fixture_version` 只标识测试数据组织方式，`schema_version` 表示目标会话格式；`cases` 中每例给出完整 modules/padding、动态区、矩阵和输出尺寸，是 placement 测试输入与预期，不是包含 markers 的完整会话布局。逻辑画布明确为 121×109，动态区明确为 `[7,11,108,94]`；这些测试输入不由任一 App 的动态区百分比反推，也不声称两 App 原边界相同。
+
+fixture 覆盖四个必需网格和 F68/C52 原单排各四旋转，共 24 例。`payload_oracles` 原样复用原 14 个载荷向量的数据数组及 CRC/Runner 预期，render_seq 在共同 fixture 中转为十进制字符串；C52 使用同一数组前 52 项。`placement_oracles` 另固定 render_seq="1" 的每种几何全部槽位码值，分别明确 data_codes 和 padding_codes，不由产品编码器或布局实现生成 expected。四个网格 padding_codes 分别为 `[32,224,32,224]`、`[32,224,32,224,32,224,32,224]`、`[32,224,32,224]`、`[32,224]`；单排为空。
+
+独立锚点为 F68-G6x12 首格 `[7,11,15,24]`、末数据格 `[65,80,74,94]`、90°首格 `[85,7,98,15]`。消费端还应验证完整覆盖、互补对不跨逻辑行、整数余数分配、padding 排除与原 14 个编码数组不变。相机 P10 4/6 像素、有效帧率 95% 和光学精度仍是现场实验目标，不是该 placement fixture 的测量结果。
+
 ## 12. 版本与确认记录
 
-2026-11-10，Android 主 agent 明确接受左上原点与半开矩形、独立两类旋转、布局集合逐段引用、ArUco 字典与 ID、完整 UUID 和中灰会话卡、序号字符串、逐字段状态、EGL 复合主键、2 s 排空上限及缺失标定集合。按其反馈补充 `QUERY_FAILED`、`CLOCK_DOMAIN_UNVERIFIED`、准确 manifest 键名与配置事件 details 后，本版标为双方确认的 v1.0。
+2026-11-10，Android 主 agent 明确接受左上原点与半开矩形、独立两类旋转、布局集合逐段引用、ArUco 字典与 ID、完整 UUID 和中灰会话卡、序号字符串、逐字段状态、EGL 复合主键、2 s 排空上限及缺失标定集合。按其反馈补充 `QUERY_FAILED`、`CLOCK_DOMAIN_UNVERIFIED`、准确 manifest 键名与配置事件 details 后，当时版本标为双方确认的 v1.0。
 
-同日，经协调者判断的审阅修订明确：恢复/重建后的动态提交使用新序号；标准预计时间与截止时间采用固定系统来源；`A120-E12` 与 `A-CAL` 分别使用独立会话；未确认结果在封存前可由真实呈现证据补充，并保留冲突诊断。本版尚未发布，这些澄清继续使用 `schema_version="1.0"`，由协调者同步各仓库副本。
+同日，v1.0 经协调者判断的审阅修订明确：恢复/重建后的动态提交使用新序号；标准预计时间与截止时间采用固定系统来源；`A120-E12` 与 `A-CAL` 分别使用独立会话；未确认结果在封存前可由真实呈现证据补充，并保留冲突诊断。这些澄清使用 schema 1.0，随后已随 Mac v0.1.0 发布；不能再把原稿“尚未发布”作为当前事实。
 
-本次确认限于显示端数据与交接语义。屏幕模型 `model` 的数值 schema 留给识别后端；v1.0 只统一其容器、引用和缺失语义。后续影响公共键名、类型或语义的变更须同步两端契约，不能仅修改一端的平台说明。
+同日，CR-001 三端协调决定新会话使用 schema 1.1，增加唯一 geometry_profile 和完整网格扩展，padding.level 使用实际整数码值，保留原单排与 1.0 读取支持；统一平台实际 pixel_format 描述和标定几何绑定。光学编码、原日志字段/事件、六文件与坐标键保持不变。共同 fixture 字节同步后供三端独立实现。
+
+本次确认限于显示端数据与交接语义。屏幕模型 `model` 的数值 schema 留给识别后端；本契约只统一其容器、引用和缺失语义。后续影响公共键名、类型或语义的变更须同步三端契约，不能仅修改一端的平台说明。
 
 ## 来源
 

@@ -160,7 +160,7 @@ final class LayoutTests: XCTestCase {
             rotationDeg: 270
         )
         let document = JSONValue.object([
-            "schema_version": .string("1.0"),
+            "schema_version": .string("1.1"),
             "layouts": .array([layout.json()])
         ])
         let parsed = try JSONParser.parse(document.serialized())
@@ -197,4 +197,96 @@ final class LayoutTests: XCTestCase {
         XCTAssertLessThan(zero.modules.first!.x0, zero.modules.last!.x0)
         XCTAssertLessThan(ninety.modules.first!.y0, ninety.modules.last!.y0)
     }
+    private func gridFixture() throws -> JSONValue {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        return try JSONParser.parse(Data(contentsOf: root.appendingPathComponent("docs/cw/fixtures/cr-001-layouts.json")))
+    }
+
+    func testSharedPlacementFixtureAllGeometriesAndRotations() throws {
+        let fixture = try gridFixture()
+        let cases = try XCTUnwrap(fixture["cases"]?.arrayValue)
+        XCTAssertEqual(cases.count, 24)
+        for expected in cases {
+            let geometry = try XCTUnwrap(GeometryProfile(rawValue: XCTUnwrap(expected["geometry_profile"]?.stringValue)))
+            let angle = Int(try XCTUnwrap(expected["pattern_rotation_deg"]?.intValue))
+            let canvas = PixelSize(width: 121, height: 109)
+            let slots = try LayoutBuilder.slotRects(geometryProfile: geometry,
+                dynamicRect: RectPx(x0: 7, y0: 11, x1: 108, y1: 94), rotationDeg: angle, patternSize: canvas)
+            let count = geometry.layoutProfile.moduleCount
+            let layout = LayoutSpec(layoutID: try XCTUnwrap(expected["layout_id"]?.stringValue),
+                geometryProfile: geometry,
+                drawableSize: PixelSize(width: Int(try XCTUnwrap(expected["drawable_width_px"]?.intValue)),
+                                        height: Int(try XCTUnwrap(expected["drawable_height_px"]?.intValue))),
+                patternSize: canvas, patternRotationDeg: angle, levels: .sdrDefault,
+                dynamicRectPx: PatternRotation.rect(RectPx(x0: 7, y0: 11, x1: 108, y1: 94), degrees: angle, patternSize: canvas),
+                modules: Array(slots.prefix(count)),
+                padding: (count..<slots.count).map { PaddingPlacement(slotIndex: $0, rectPx: slots[$0], level: ($0-count)%2 == 0 ? 32 : 224) },
+                markers: [])
+            let actual = layout.json()
+            for field in try XCTUnwrap(expected.objectValue).keys where field != "case_id" {
+                if field == "pattern_to_drawable" {
+                    XCTAssertEqual(actual[field]?.arrayValue?.flatMap { $0.arrayValue ?? [] }.compactMap(\.doubleValue),
+                                   expected[field]?.arrayValue?.flatMap { $0.arrayValue ?? [] }.compactMap(\.doubleValue))
+                } else {
+                    XCTAssertEqual(actual[field], expected[field], "\(geometry) r\(angle) \(field)")
+                }
+            }
+        }
+        for oracle in try XCTUnwrap(fixture["payload_oracles"]?.arrayValue) {
+            let seq = try XCTUnwrap(UInt64(XCTUnwrap(oracle["render_seq"]?.stringValue)))
+            let codes = try XCTUnwrap(oracle["module_codes"]?.arrayValue).compactMap { $0.intValue.map(UInt8.init) }
+            for profile in LayoutProfile.allCases {
+                XCTAssertEqual(PatternEncoder.encode(RenderSeq(seq), profile: profile).codes(.sdrDefault),
+                               Array(codes.prefix(profile.moduleCount)))
+            }
+        }
+    }
+
+    func testMacGridKeepsOriginalBoundaryMarkersAndCustomLevels() throws {
+        for geometry in GeometryProfile.macOSCases {
+            for rotation in rotations {
+                let size = PixelSize(width: 1003, height: 709)
+                let old = try LayoutBuilder.make(layoutID: "old", profile: geometry.layoutProfile,
+                                                 drawable: size, rotationDeg: rotation)
+                let grid = try LayoutBuilder.make(layoutID: "grid", geometryProfile: geometry,
+                                                  drawable: size, rotationDeg: rotation,
+                                                  levels: PatternLevels(low: 40, high: 200))
+                XCTAssertEqual(grid.dynamicRectPx, old.dynamicRectPx)
+                XCTAssertEqual(grid.markers, old.markers)
+                XCTAssertEqual(grid.padding.map(\.level), (0..<geometry.paddingCount).map { $0%2 == 0 ? 40 : 200 })
+                XCTAssertEqual(grid.modules.count, geometry.layoutProfile.moduleCount)
+                let all = grid.modules + grid.padding.map(\.rectPx)
+                XCTAssertEqual(all.reduce(0) { $0 + $1.width*$1.height }, grid.dynamicRectPx.width*grid.dynamicRectPx.height)
+                for (index, rect) in all.enumerated() {
+                    XCTAssertTrue(grid.dynamicRectPx.contains(rect))
+                    XCTAssertGreaterThan(rect.width, 0)
+                    XCTAssertGreaterThan(rect.height, 0)
+                    for other in all.dropFirst(index+1) { XCTAssertFalse(rect.intersects(other)) }
+                }
+            }
+        }
+    }
+
+    func testAllPayloadsReorderWithoutChangingTheProtocolArray() throws {
+        // Independent raster ordering recovers data from each physical grid.
+        for geometry in [GeometryProfile.f68G6x12, .c52G5x12] {
+            let layout = try LayoutBuilder.make(layoutID: "grid", geometryProfile: geometry,
+                drawable: PixelSize(width: 1003, height: 709), rotationDeg: 0)
+            let rects = layout.modules + layout.padding.map(\.rectPx)
+            let rasterOrder = rects.indices.sorted {
+                rects[$0].y0 == rects[$1].y0 ? rects[$0].x0 < rects[$1].x0 : rects[$0].y0 < rects[$1].y0
+            }
+            var raster = [UInt8](repeating: 0, count: rects.count)
+            for n in UInt64(0)..<65536 {
+                let codes = PatternEncoder.encode(RenderSeq(n), profile: layout.profile).codes(layout.levels)
+                for (slot, source) in rasterOrder.enumerated() {
+                    raster[slot] = source < codes.count ? codes[source] : layout.padding[source-codes.count].level
+                }
+                XCTAssertEqual(Array(raster.prefix(codes.count)), codes)
+                XCTAssertEqual(Array(raster.dropFirst(codes.count)), layout.padding.map(\.level))
+            }
+        }
+    }
+
 }

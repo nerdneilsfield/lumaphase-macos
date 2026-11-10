@@ -170,6 +170,9 @@ public enum SceneBuilder {
         for (index, rect) in layout.modules.enumerated() where index < codes.count {
             solid += self.rect(rect, color: RGBA8(code: codes[index]))
         }
+        for padding in layout.padding {
+            solid += self.rect(padding.rectPx, color: RGBA8(code: padding.level))
+        }
         return Scene(solid: solid)
     }
 
@@ -180,18 +183,26 @@ public enum SceneBuilder {
         let dynamic = layout.dynamicRectPx
         switch screen {
         case .geometry:
-            // One-pixel boundaries: the same integers exported in layout.json.
-            for rect in layout.modules {
-                if layout.patternRotationDeg % 180 == 0 {
-                    solid += self.rect(RectPx(x0: rect.x0, y0: dynamic.y0, x1: rect.x0 + 1, y1: dynamic.y1),
-                                       color: .white)
-                } else {
-                    solid += self.rect(RectPx(x0: dynamic.x0, y0: rect.y0, x1: dynamic.x1, y1: rect.y0 + 1),
-                                       color: .white)
+            if layout.geometryProfile.rows == 1 {
+                // Preserve the original single-row calibration pattern.
+                for rect in layout.modules {
+                    if layout.patternRotationDeg % 180 == 0 {
+                        solid += self.rect(RectPx(x0: rect.x0, y0: dynamic.y0, x1: rect.x0 + 1, y1: dynamic.y1), color: .white)
+                    } else {
+                        solid += self.rect(RectPx(x0: dynamic.x0, y0: rect.y0, x1: dynamic.x1, y1: rect.y0 + 1), color: .white)
+                    }
+                }
+                solid += self.rect(RectPx(x0: dynamic.x0, y0: dynamic.y0, x1: dynamic.x1, y1: dynamic.y0 + 1), color: .white)
+                solid += self.rect(RectPx(x0: dynamic.x0, y0: dynamic.y1 - 1, x1: dynamic.x1, y1: dynamic.y1), color: .white)
+            } else {
+                // Outline every data and padding cell in the exported geometry.
+                for cell in layout.modules + layout.padding.map(\.rectPx) {
+                    solid += self.rect(RectPx(x0: cell.x0, y0: cell.y0, x1: cell.x1, y1: cell.y0 + 1), color: .white)
+                    solid += self.rect(RectPx(x0: cell.x0, y0: cell.y1 - 1, x1: cell.x1, y1: cell.y1), color: .white)
+                    solid += self.rect(RectPx(x0: cell.x0, y0: cell.y0, x1: cell.x0 + 1, y1: cell.y1), color: .white)
+                    solid += self.rect(RectPx(x0: cell.x1 - 1, y0: cell.y0, x1: cell.x1, y1: cell.y1), color: .white)
                 }
             }
-            solid += self.rect(RectPx(x0: dynamic.x0, y0: dynamic.y0, x1: dynamic.x1, y1: dynamic.y0 + 1), color: .white)
-            solid += self.rect(RectPx(x0: dynamic.x0, y0: dynamic.y1 - 1, x1: dynamic.x1, y1: dynamic.y1), color: .white)
         case .staircase(let levels):
             let width = dynamic.width
             guard !levels.isEmpty, width > 0 else { break }
@@ -202,8 +213,8 @@ public enum SceneBuilder {
                                    color: RGBA8(code: level))
             }
         case .complementary(let flip):
-            // Equal light/dark area: neighbouring modules always alternate.
-            for (index, rect) in layout.modules.enumerated() {
+            // Equal counts; integer rounding can make light/dark pixel areas differ.
+            for (index, rect) in (layout.modules + layout.padding.map(\.rectPx)).enumerated() {
                 let isHigh = (index % 2 == 0) != flip
                 let level = isHigh ? layout.levels.high : layout.levels.low
                 solid += self.rect(rect, color: RGBA8(code: level))

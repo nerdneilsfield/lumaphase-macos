@@ -25,7 +25,8 @@ public struct AppOptions {
     public var autoStart = false
     public var outputDirectory: URL?
     public var profile: ExperimentProfile = .m59S1
-    public var layoutProfile: LayoutProfile = .f68
+    public var geometryProfile: GeometryProfile = .f68G6x12
+    public var layoutProfile: LayoutProfile { geometryProfile.layoutProfile }
     public var rotationDeg = 0
     public var runningSeconds: Double?
     public var showHelp = false
@@ -70,10 +71,11 @@ public struct AppOptions {
                 options.profile = ExperimentProfile(rawValue: value)
             case "--layout":
                 let value = try next(argument)
-                guard let layout = LayoutProfile(rawValue: value.uppercased()) else {
+                guard let layout = GeometryProfile(rawValue: value.uppercased().replacingOccurrences(of: "X", with: "x")),
+                      GeometryProfile.macOSCases.contains(layout) else {
                     throw AppOptionError.invalidValue(option: argument, value: value)
                 }
-                options.layoutProfile = layout
+                options.geometryProfile = layout
             case "--rotation":
                 let value = try next(argument)
                 guard let degrees = Int(value), PatternRotation.isSupported(degrees) else {
@@ -103,7 +105,7 @@ public struct AppOptions {
 
     Usage: Lumaphase [options]
       --profile <M59-S1|M120-S1|M59-E20|M-CAL>   experiment profile (default M59-S1)
-      --layout <F68|C52>                          layout profile (default F68)
+      --layout <F68-G6x12|C52-G5x12|F68|C52>       geometry (default F68-G6x12)
       --rotation <0|90|180|270>                   pattern rotation (default 0)
       --duration <seconds>                        RUNNING duration (default 90)
       --output <dir>                              session export root

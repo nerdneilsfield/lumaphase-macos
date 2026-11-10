@@ -231,7 +231,7 @@ public final class SessionPackage {
 
     private func writeLayoutDocument() throws {
         let document = JSONValue.object([
-            "schema_version": .string("1.0"),
+            "schema_version": .string("1.1"),
             "layouts": .array(layouts.map { $0.json() })
         ])
         try write(document, name: SessionPackage.layoutFileName)
