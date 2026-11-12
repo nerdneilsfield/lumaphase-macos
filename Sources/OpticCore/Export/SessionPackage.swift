@@ -34,7 +34,7 @@ public final class SessionPackage {
     public let timeBase: SessionTimeBase
 
     private var manifest: SessionManifest
-    private var layouts: [LayoutSpec] = []
+    private var layouts: [DisplayLayout] = []
     private var profiles: [ImportedCalibrationProfile] = []
     private var segmentIDs: Set<SegmentID> = []
     private var finished = false
@@ -82,6 +82,10 @@ public final class SessionPackage {
     /// Identical re-registration is allowed; the referenced object stays
     /// immutable.
     public func addLayout(_ layout: LayoutSpec) throws {
+        try addLayout(.optc(layout))
+    }
+
+    public func addLayout(_ layout: DisplayLayout) throws {
         guard !finished else { throw SessionPackageError.alreadyFinished }
         if let existing = layouts.first(where: { $0.layoutID == layout.layoutID }) {
             guard existing == layout else { throw SessionPackageError.duplicateLayout(layout.layoutID) }
@@ -120,7 +124,7 @@ public final class SessionPackage {
     }
 
     public var registeredSegments: [SegmentConfig] { manifest.segments }
-    public var registeredLayouts: [LayoutSpec] { layouts }
+    public var registeredLayouts: [DisplayLayout] { layouts }
 
     /// Flushes both logs, writes LOG_OVERFLOW rows from the latches, then the
     /// closing events and the four JSON documents. Returns the session
@@ -231,7 +235,7 @@ public final class SessionPackage {
 
     private func writeLayoutDocument() throws {
         let document = JSONValue.object([
-            "schema_version": .string("1.1"),
+            "schema_version": .string("1.2"),
             "layouts": .array(layouts.map { $0.json() })
         ])
         try write(document, name: SessionPackage.layoutFileName)

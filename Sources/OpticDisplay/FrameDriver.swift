@@ -8,10 +8,17 @@ import QuartzCore
 public struct FrozenSegment {
     public let sessionID: SessionID
     public let config: SegmentConfig
-    public let layout: LayoutSpec
+    public let layout: DisplayLayout
     public let surfaceInstanceID: String
 
     public init(sessionID: SessionID, config: SegmentConfig, layout: LayoutSpec, surfaceInstanceID: String) {
+        self.sessionID = sessionID
+        self.config = config
+        self.layout = .optc(layout)
+        self.surfaceInstanceID = surfaceInstanceID
+    }
+
+    public init(sessionID: SessionID, config: SegmentConfig, layout: DisplayLayout, surfaceInstanceID: String) {
         self.sessionID = sessionID
         self.config = config
         self.layout = layout
@@ -27,6 +34,7 @@ public enum FramePlan {
     case dynamic(FrozenSegment)
     case card(FrozenSegment, kind: DisplayFrameKind, phase: SessionPhase, text: CardText?, token: Int)
     case calibration(FrozenSegment, screen: CalibrationScreen, token: Int)
+    case typedCalibration(FrozenSegment)
     case preview(layout: LayoutSpec, text: CardText?, token: Int)
 }
 
@@ -192,23 +200,36 @@ public final class FrameDriver: NSObject, CAMetalDisplayLinkDelegate {
             // Isolated presentations on an idle layer are reported as skipped
             // (presentedTime 0) on this machine, so static content is presented
             // continuously while its phase lasts.
-            var scene = SceneBuilder.cardScene(segment.layout)
+            guard let layout = segment.layout.optcLayout else { return }
+            var scene = SceneBuilder.cardScene(layout)
             if text != nil {
                 scene.text = SceneBuilder.textQuad(
-                    patternRect: SceneBuilder.patternTextRect(segment.layout),
+                    patternRect: SceneBuilder.patternTextRect(layout),
                     patternSize: segment.layout.patternSize,
                     rotationDeg: segment.layout.patternRotationDeg
                 )
             }
-            submitStatic(scene: scene, text: text, segment: segment,
+            submitStatic(scene: { _ in scene }, text: text, segment: segment,
                          kind: kind, phase: phase, update: update)
         case let .calibration(segment, screen, _):
             guard surfaceMatches(segment.layout, update.drawable) else { return }
             // Same per-update submission rule as cards: calibration patterns
             // need real presentation evidence for every held frame.
-            let scene = SceneBuilder.calibrationScene(segment.layout, screen)
-            submitStatic(scene: scene, text: nil, segment: segment,
+            guard let layout = segment.layout.optcLayout else { return }
+            let scene = SceneBuilder.calibrationScene(layout, screen)
+            submitStatic(scene: { _ in scene }, text: nil, segment: segment,
                          kind: .calibration, phase: .calibration, update: update)
+        case .typedCalibration(let segment):
+            guard surfaceMatches(segment.layout, update.drawable) else { return }
+            switch segment.layout {
+            case .optc: return
+            case .calibrationTarget(let target):
+                submitStatic(scene: { _ in SceneBuilder.largeTagCalibrationScene(target) }, text: nil,
+                    segment: segment, kind: .calibration, phase: .calibration, update: update)
+            case .fullscreenDiagnostic(let diagnostic):
+                submitStatic(scene: { id in SceneBuilder.fullscreenDiagnosticScene(diagnostic, nativeFrameID: id) }, text: nil,
+                    segment: segment, kind: .calibration, phase: .calibration, update: update)
+            }
         case let .preview(layout, text, token):
             let drawable = update.drawable
             let actual = PixelSize(width: drawable.texture.width, height: drawable.texture.height)
@@ -234,7 +255,7 @@ public final class FrameDriver: NSObject, CAMetalDisplayLinkDelegate {
     }
 
     /// The frozen layout is never drawn into a different drawable size.
-    private func surfaceMatches(_ layout: LayoutSpec, _ drawable: CAMetalDrawable) -> Bool {
+    private func surfaceMatches(_ layout: DisplayLayout, _ drawable: CAMetalDrawable) -> Bool {
         let actual = PixelSize(width: drawable.texture.width, height: drawable.texture.height)
         guard actual == layout.drawableSize else {
             plan = .held
@@ -247,8 +268,9 @@ public final class FrameDriver: NSObject, CAMetalDisplayLinkDelegate {
     // MARK: - Submission
 
     private func submitDynamic(_ segment: FrozenSegment, _ update: CAMetalDisplayLink.Update) {
-        guard let recorder, let seq = allocateRenderSeq?() else { return }
-        let bits = PatternEncoder.encode(seq, profile: segment.layout.profile)
+        guard let recorder, let layout = segment.layout.optcLayout,
+              let seq = allocateRenderSeq?() else { return }
+        let bits = PatternEncoder.encode(seq, profile: layout.profile)
         guard let identity = try? FrameIdentity(
             sessionID: segment.sessionID,
             segmentID: segment.config.segmentID,
@@ -271,12 +293,12 @@ public final class FrameDriver: NSObject, CAMetalDisplayLinkDelegate {
             break
         }
 
-        let scene = SceneBuilder.dynamicScene(segment.layout, bits: bits)
+        let scene = SceneBuilder.dynamicScene(layout, bits: bits)
         submit(scene: scene, text: nil, identity: identity, segment: segment, update: update)
     }
 
     private func submitStatic(
-        scene: Scene,
+        scene: (NativeFrameID) -> Scene,
         text: CardText?,
         segment: FrozenSegment,
         kind: DisplayFrameKind,
@@ -300,7 +322,7 @@ public final class FrameDriver: NSObject, CAMetalDisplayLinkDelegate {
         case .sealed, .duplicateFrameID:
             return
         case .tracking, .pendingQueueFull:
-            submit(scene: scene, text: text, identity: identity, segment: segment, update: update)
+            submit(scene: scene(identity.nativeFrameID), text: text, identity: identity, segment: segment, update: update)
         }
     }
 

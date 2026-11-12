@@ -19,6 +19,8 @@ final class SessionController: NSObject, ObservableObject {
     @Published var brightnessText: String = ""
     @Published var operatorNote: String = ""
     @Published var outputDirectory: URL = SessionController.defaultOutputDirectory()
+    @Published var largeTagInitialization = false
+    @Published private(set) var awaitingGeometryConfirmation = false
     @Published var calibrationGeometry = true
     @Published var calibrationStaircase = true
     @Published var calibrationFlip = true
@@ -49,6 +51,8 @@ final class SessionController: NSObject, ObservableObject {
         case draining
         case paused
         case calibrating
+        case positioning
+        case diagnosing
         case finished
     }
 
@@ -63,6 +67,8 @@ final class SessionController: NSObject, ObservableObject {
     /// cannot leak into later segments or the export.
     private struct FrozenConfig {
         var profile: ExperimentProfile
+        var diagnostic: DiagnosticSessionMode
+        var largeTags: Bool
         var geometryProfile: GeometryProfile
         var rotationDeg: Int
         var lowLevel: Int
@@ -124,6 +130,13 @@ final class SessionController: NSObject, ObservableObject {
     private var restartPending = false
     private var pausedBySystem = false
     private var fullscreenObserver: NSObjectProtocol?
+    private var resumeAfterPositioning = false
+    private var positioningRunLayout: LayoutSpec?
+    private var positioningConfirmed = false
+    private var diagnosticSteps: [DiagnosticStep] = []
+    private var diagnosticIndex = 0
+    private var diagnosticDeadline: Int64 = 0
+    private var lastDiagnosticLayout: DisplayLayout?
     private var calibrationSteps: [(duration: Int64, screen: CalibrationScreen, note: String)] = []
     private var calibrationIndex = 0
     private var calibrationStepDeadline: Int64 = 0
@@ -153,6 +166,7 @@ final class SessionController: NSObject, ObservableObject {
     // MARK: - Settings application
 
     private func apply(options: AppOptions) {
+        largeTagInitialization = options.largeTags
         profile = options.profile
         geometryProfile = options.geometryProfile
         rotationDeg = options.rotationDeg
@@ -313,11 +327,18 @@ final class SessionController: NSObject, ObservableObject {
 
     // MARK: - Session control
 
-    func start() {
+    func start(mode: DiagnosticSessionMode? = nil) {
         guard state == .idle || state == .finished else { return }
         guard !isBusy else { return }
+        let diagnostic = mode ?? options.diagnostic
+        if diagnostic == .dynamicBW && profile.requestedRefresh == nil {
+            statusText = "VSync 黑白诊断需先选择 M59-S1、M120-S1 或 M59-E20 的刷新请求。"
+            return
+        }
         config = FrozenConfig(
             profile: profile,
+            diagnostic: diagnostic,
+            largeTags: diagnostic == .none && profile != .mCal && largeTagInitialization,
             geometryProfile: geometryProfile,
             rotationDeg: rotationDeg,
             lowLevel: lowLevel,
@@ -357,6 +378,13 @@ final class SessionController: NSObject, ObservableObject {
         let timeBase = SessionTimeBase(clock: clock)
         self.sessionID = sessionID
         self.timeBase = timeBase
+        positioningConfirmed = false
+        positioningRunLayout = nil
+        resumeAfterPositioning = false
+        awaitingGeometryConfirmation = false
+        diagnosticSteps = []
+        diagnosticIndex = 0
+        lastDiagnosticLayout = nil
         nextSegmentIndex = 0
         nextLayoutIndex = 0
         nextSeqValue = 0
@@ -467,20 +495,25 @@ final class SessionController: NSObject, ObservableObject {
             : "已暂停。恢复时建立新段并继续使用会话原点与递增序号。"
     }
 
-    private func resume() {
+    private func resume(from previousPhase: SessionPhase = .paused, reason: SegmentStartReason = .resume) {
         guard let driver, let writer = package?.eventWriter else {
             statusText = "恢复失败：会话已结束"
             return
         }
+        if config?.largeTags == true && !positioningConfirmed {
+            resumeAfterPositioning = true
+            beginPositioning()
+            return
+        }
         do {
-            let segment = try startSegment(reason: .resume)
+            let segment = try startSegment(reason: reason)
             currentSegment = segment
             let now = clock.rawNanoseconds()
             driver.setPlan(.dynamic(segment))
             driver.setPreferredRefresh(config?.profile.requestedRefresh)
             driver.resume()
             runningDeadline = now + pausedRemaining
-            writer.phaseChanged(from: .paused, to: .running, plannedDurationNanoseconds: pausedRemaining)
+            writer.phaseChanged(from: previousPhase, to: .running, plannedDurationNanoseconds: pausedRemaining)
             phase = .running
             state = .running
             canPause = true
@@ -498,7 +531,7 @@ final class SessionController: NSObject, ObservableObject {
             completeQuit(true)
         case .draining:
             return
-        case .preparing, .warmup, .sessionCard, .running, .endCard, .paused, .calibrating:
+        case .preparing, .warmup, .sessionCard, .running, .endCard, .paused, .calibrating, .positioning, .diagnosing:
             closeReason = .userStop
             beginDrain()
         }
@@ -594,6 +627,13 @@ final class SessionController: NSObject, ObservableObject {
                 smokeResumeAt = 0
                 resume()
             }
+        case .positioning: return
+        case .diagnosing:
+            if now >= diagnosticDeadline {
+                endSegment(diagnosticIndex + 1 < diagnosticSteps.count ? .configurationChanged : .normalEnd)
+                diagnosticIndex += 1
+                startDiagnosticStep()
+            }
         case .calibrating:
             advanceCalibration(now)
         case .idle, .finished:
@@ -611,7 +651,7 @@ final class SessionController: NSObject, ObservableObject {
             unconfirmedCount = stats.segments.reduce(0) { $0 + $1.unconfirmed }
         }
         switch state {
-        case .warmup, .sessionCard, .running, .endCard, .calibrating, .paused:
+        case .warmup, .sessionCard, .running, .endCard, .calibrating, .paused, .positioning, .diagnosing:
             checkDisplayChange(now)
         default:
             break
@@ -640,18 +680,28 @@ final class SessionController: NSObject, ObservableObject {
 
     private func beginWarmup() {
         guard let driver, let writer = package?.eventWriter else { return }
+        if let config, config.diagnostic != .none {
+            diagnosticSteps = config.diagnostic.steps
+            diagnosticIndex = 0
+            startDiagnosticStep()
+            return
+        }
+        if config?.largeTags == true && !positioningConfirmed {
+            beginPositioning()
+            return
+        }
         if config?.profile == .mCal {
             beginCalibration()
             return
         }
         do {
-            let segment = try startSegment(reason: .sessionStart)
+            let segment = try startSegment(reason: nextSegmentIndex == 0 ? .sessionStart : .configurationChanged)
             currentSegment = segment
             let durations = phaseDurations()
             let now = clock.rawNanoseconds()
             phaseDeadline = now + durations.warmup
             runStartRaw = now
-            writer.phaseChanged(from: .configured, to: .warmup, plannedDurationNanoseconds: durations.warmup)
+            writer.phaseChanged(from: phase == .calibration ? .calibration : .configured, to: .warmup, plannedDurationNanoseconds: durations.warmup)
             issueWarmupPlan(segment)
             phase = .warmup
             state = .warmup
@@ -744,6 +794,7 @@ final class SessionController: NSObject, ObservableObject {
     }
 
     private func beginDrain() {
+        awaitingGeometryConfirmation = false
         guard let writer = package?.eventWriter else {
             completeQuit(true)
             return
@@ -805,6 +856,7 @@ final class SessionController: NSObject, ObservableObject {
             statusText = "导出失败：\(error)"
         }
         teardownDisplay()
+        awaitingGeometryConfirmation = false
         state = .finished
         stopTimer()
         isBusy = false
@@ -851,6 +903,7 @@ final class SessionController: NSObject, ObservableObject {
             }
         }
         teardownDisplay()
+        awaitingGeometryConfirmation = false
         state = .finished
         stopTimer()
         isBusy = false
@@ -882,21 +935,53 @@ final class SessionController: NSObject, ObservableObject {
 
     // MARK: - Segments
 
-    private func startSegment(reason: SegmentStartReason, note: String? = nil) throws -> FrozenSegment {
+    private enum SegmentContent {
+        case optc
+        case largeTags
+        case diagnostic(DiagnosticPattern)
+    }
+
+    private func startSegment(reason: SegmentStartReason, note: String? = nil,
+                              content: SegmentContent = .optc,
+                              experiment: ExperimentProfile? = nil,
+                              existingLayout: DisplayLayout? = nil) throws -> FrozenSegment {
         guard let package, let driver, let sessionID, let config else {
             throw RendererError.commandBuffer
         }
         let screen = displayWindow?.currentScreen ?? currentScreen ?? NSScreen.main!
         let info = DisplayInspector.info(for: screen)
         let size = driver.drawableSize
-        let layout = try LayoutBuilder.make(
-            layoutID: "layout-\(nextLayoutIndex)",
-            geometryProfile: config.geometryProfile,
-            drawable: size,
-            rotationDeg: config.rotationDeg,
-            levels: config.levels
-        )
-        nextLayoutIndex += 1
+        let layout: DisplayLayout
+        if let existingLayout, existingLayout.drawableSize == size {
+            layout = existingLayout
+        } else {
+            let id = "layout-\(nextLayoutIndex)"
+            switch content {
+            case .optc:
+                if let prepared = positioningRunLayout, prepared.drawableSize == size,
+                   prepared.patternRotationDeg == config.rotationDeg,
+                   prepared.geometryProfile == config.geometryProfile, prepared.levels == config.levels {
+                    layout = .optc(prepared)
+                } else {
+                    layout = .optc(try LayoutBuilder.make(layoutID: id, geometryProfile: config.geometryProfile,
+                        drawable: size, rotationDeg: config.rotationDeg, levels: config.levels))
+                }
+                positioningRunLayout = nil
+            case .largeTags:
+                // Reserve the exact immutable RUN object used by the positioning target.
+                // It enters the exported history only when it is actually displayed.
+                let run = try LayoutBuilder.make(layoutID: "layout-\(nextLayoutIndex + 1)",
+                    geometryProfile: config.geometryProfile, drawable: size,
+                    rotationDeg: config.rotationDeg, levels: config.levels)
+                layout = .calibrationTarget(try LargeTagCalibrationTarget.make(layoutID: id, runLayout: run))
+                positioningRunLayout = run
+                nextLayoutIndex += 1
+            case .diagnostic(let pattern):
+                layout = .fullscreenDiagnostic(try FullscreenDiagnosticLayout(layoutID: id,
+                    drawable: size, rotationDeg: config.rotationDeg, pattern: pattern))
+            }
+            nextLayoutIndex += 1
+        }
         let snapshot = DisplayInspector.snapshot(
             drawableSize: size,
             info: info,
@@ -904,14 +989,16 @@ final class SessionController: NSObject, ObservableObject {
             colorSpaceName: DisplayInspector.renderColorSpaceName,
             operatorNote: config.operatorNote
         )
-        let segmentConfig = SegmentConfig(
+        var segmentConfig = SegmentConfig(
             segmentID: SegmentID(nextSegmentIndex),
             layoutID: layout.layoutID,
-            experimentProfile: config.profile,
+            experimentProfile: experiment ?? config.profile,
             snapshot: snapshot,
             displayProfileID: config.importedProfile?.profileID,
             operatorNote: note ?? config.operatorNote
         )
+        // Custom CR-002 names describe content; keep the actual selected request.
+        segmentConfig.requestedRefresh = config.profile.requestedRefresh
         nextSegmentIndex += 1
         try package.addLayout(layout)
         try package.addSegment(segmentConfig)
@@ -929,7 +1016,7 @@ final class SessionController: NSObject, ObservableObject {
     }
 
     private func handleOverflow() {
-        guard state == .running || state == .calibrating || state == .paused else { return }
+        guard state == .running || state == .calibrating || state == .paused || state == .positioning || state == .diagnosing else { return }
         closeReason = .overflow
         statusText = "日志溢出：停止新动态状态并准备导出不完整会话。"
         if let segment = currentSegment, let writer = package?.eventWriter {
@@ -940,7 +1027,7 @@ final class SessionController: NSObject, ObservableObject {
     }
 
     private func displaySignatureFor(info: DisplayInfo, size: PixelSize) -> String {
-        "\(info.modeID ?? "-")|\(info.maximumFramesPerSecond)|\(size.width)x\(size.height)|\(info.displayID)"
+        "\(info.modeID ?? "-")|\(info.maximumFramesPerSecond)|\(size.width)x\(size.height)|\(info.displayID)|\(info.rotationRawDegrees)"
     }
 
     private func checkDisplayChange(_ now: Int64) {
@@ -959,10 +1046,11 @@ final class SessionController: NSObject, ObservableObject {
         currentScreen = screen
         switch state {
         case .paused:
+            if config?.largeTags == true { positioningConfirmed = false }
             // No segment exists while paused; resume builds the new pair.
             statusText = "暂停中检测到显示配置变化；恢复时将建立新段。"
             return
-        case .warmup, .sessionCard, .running, .endCard, .calibrating:
+        case .warmup, .sessionCard, .running, .endCard, .calibrating, .positioning, .diagnosing:
             let reason: SegmentEndReason
             if pendingEndReason != .configurationChanged {
                 reason = pendingEndReason
@@ -990,9 +1078,31 @@ final class SessionController: NSObject, ObservableObject {
             writer.segmentEnded(segment.config.segmentID, reason: endReason)
             currentSegment = nil
         }
+        if config?.largeTags == true && positioningConfirmed && (state == .running || state == .warmup || state == .sessionCard) {
+            if state == .running {
+                pausedRemaining = max(1, runningDeadline - clock.rawNanoseconds())
+                resumeAfterPositioning = true
+            }
+            positioningConfirmed = false
+            awaitingGeometryConfirmation = true
+            writer.phaseChanged(from: phase, to: .calibration, plannedDurationNanoseconds: nil)
+            phase = .calibration
+            state = .positioning
+            canPause = false
+        }
         do {
             let startReason: SegmentStartReason = nextSegmentIndex == 0 ? .sessionStart : .configurationChanged
-            let segment = try startSegment(reason: startReason)
+            let segment: FrozenSegment
+            if state == .positioning {
+                segment = try startSegment(reason: startReason, content: .largeTags,
+                    experiment: ExperimentProfile(rawValue: "CR002-TAG"))
+            } else if state == .diagnosing {
+                let step = diagnosticSteps[diagnosticIndex]
+                segment = try startSegment(reason: startReason, content: .diagnostic(step.pattern), experiment: step.profile)
+                lastDiagnosticLayout = segment.layout
+            } else {
+                segment = try startSegment(reason: startReason)
+            }
             currentSegment = segment
             issueCurrentPhasePlan(segment)
             statusText = "显示配置变化（\(endReason.rawValue)）：新段 \(segment.config.segmentID)，新布局 \(segment.layout.layoutID)。"
@@ -1013,6 +1123,8 @@ final class SessionController: NSObject, ObservableObject {
             driver.setPlan(.dynamic(segment))
         case .endCard:
             issueEndCardPlan(segment)
+        case .positioning, .diagnosing:
+            driver.setPlan(.typedCalibration(segment))
         case .calibrating:
             if calibrationIndex < calibrationSteps.count {
                 let step = calibrationSteps[calibrationIndex]
@@ -1026,7 +1138,7 @@ final class SessionController: NSObject, ObservableObject {
 
     private func handleSurfaceMismatch(_ actual: PixelSize) {
         switch state {
-        case .warmup, .sessionCard, .running, .endCard, .calibrating:
+        case .warmup, .sessionCard, .running, .endCard, .calibrating, .positioning, .diagnosing:
             if pendingEndReason != .fullscreenExit {
                 pendingEndReason = .surfaceChanged
             }
@@ -1039,7 +1151,7 @@ final class SessionController: NSObject, ObservableObject {
 
     private func handleFullscreenExit() {
         switch state {
-        case .warmup, .sessionCard, .running, .endCard, .calibrating:
+        case .warmup, .sessionCard, .running, .endCard, .calibrating, .positioning, .diagnosing:
             pendingEndReason = .fullscreenExit
             restartPending = true
             driver?.setPlan(.held)
@@ -1092,12 +1204,73 @@ final class SessionController: NSObject, ObservableObject {
         }
     }
 
+    private func beginPositioning() {
+        do {
+            let segment = try startSegment(reason: nextSegmentIndex == 0 ? .sessionStart : .configurationChanged, content: .largeTags,
+                experiment: ExperimentProfile(rawValue: "CR002-TAG"))
+            currentSegment = segment
+            package?.eventWriter.phaseChanged(from: phase.isDisplayPhase || phase == .paused ? phase : .configured, to: .calibration, plannedDurationNanoseconds: nil)
+            state = .positioning
+            phase = .calibration
+            canPause = false
+            awaitingGeometryConfirmation = true
+            driver?.setPlan(.typedCalibration(segment))
+            driver?.resume()
+            statusText = "大 Tag 定位：与后续 RUN 使用同一窗口；外部逐路相机完成稳定性核对后，请明确继续。未自动判定100帧通过。"
+        } catch {
+            abortActiveSession("大 Tag 定位不可用：\(error)；可取消前置定位后运行普通 RUN。")
+        }
+    }
+
+    func continueAfterLargeTags() {
+        guard state == .positioning, let segment = currentSegment, let driver else { return }
+        let screen = displayWindow?.currentScreen ?? currentScreen ?? NSScreen.main!
+        let signature = displaySignatureFor(info: DisplayInspector.info(for: screen), size: driver.drawableSize)
+        guard driver.drawableSize == segment.layout.drawableSize, signature == displaySignature, !restartPending else {
+            rebuildSegment(endReason: .surfaceChanged)
+            statusText = "尺寸已变化，定位布局已重建；外部旧映射需重新验证，再明确继续。"
+            return
+        }
+        endSegment(.configurationChanged)
+        awaitingGeometryConfirmation = false
+        positioningConfirmed = true
+        if resumeAfterPositioning {
+            resumeAfterPositioning = false
+            resume(from: .calibration, reason: .configurationChanged)
+        } else {
+            beginWarmup()
+        }
+    }
+
+    private func startDiagnosticStep() {
+        guard diagnosticIndex < diagnosticSteps.count else { beginDrain(); return }
+        let step = diagnosticSteps[diagnosticIndex]
+        do {
+            var reuse: DisplayLayout?
+            if case .fullscreenDiagnostic(let old) = lastDiagnosticLayout, old.pattern == step.pattern {
+                reuse = lastDiagnosticLayout
+            }
+            let segment = try startSegment(reason: nextSegmentIndex == 0 ? .sessionStart : .configurationChanged,
+                content: .diagnostic(step.pattern), experiment: step.profile, existingLayout: reuse)
+            currentSegment = segment
+            lastDiagnosticLayout = segment.layout
+            package?.eventWriter.phaseChanged(from: phase.isDisplayPhase ? phase : .configured,
+                to: .calibration, plannedDurationNanoseconds: step.durationNanoseconds)
+            state = .diagnosing
+            phase = .calibration
+            canPause = false
+            diagnosticDeadline = clock.rawNanoseconds() + step.durationNanoseconds
+            driver?.setPlan(.typedCalibration(segment))
+            statusText = "\(step.profile.rawValue)：计划 \(step.durationNanoseconds / 1_000_000_000)s；实际区间见呈现证据，相机曝光/RAW采集由外部设置。"
+        } catch { abortActiveSession("诊断启动失败：\(error)") }
+    }
+
     // MARK: - Calibration playback
 
     func startCalibration() {
         guard !isBusy else { return }
         profile = .mCal
-        start()
+        start(mode: DiagnosticSessionMode.none)
     }
 
     private func beginCalibration() {
@@ -1186,7 +1359,8 @@ final class SessionController: NSObject, ObservableObject {
 
     private func makeCardText(segment: FrozenSegment, lines: [String]) -> CardText? {
         guard let device else { return nil }
-        let rect = SceneBuilder.patternTextRect(segment.layout)
+        guard let layout = segment.layout.optcLayout else { return nil }
+        let rect = SceneBuilder.patternTextRect(layout)
         return CardTextRenderer.make(
             device: device,
             lines: lines,

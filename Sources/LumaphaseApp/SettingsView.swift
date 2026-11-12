@@ -1,5 +1,6 @@
 import SwiftUI
 import OpticCore
+import OpticDisplay
 
 struct SettingsView: View {
     @ObservedObject var controller: SessionController
@@ -15,6 +16,7 @@ struct SettingsView: View {
                     calibrationSection.disabled(controller.isBusy)
                 }
                 displaySection
+                cr002Actions
                 actions
                 statusSection
             }
@@ -156,6 +158,9 @@ struct SettingsView: View {
                     Toggle("灰度阶梯", isOn: $controller.calibrationStaircase)
                     Toggle("互补翻转", isOn: $controller.calibrationFlip)
                 }
+                Toggle("普通 RUN 前先显示大 Tag 定位（同一窗口，需人工继续）", isOn: $controller.largeTagInitialization)
+                Text("会话中隐藏设置窗口。外部相机逐路核对至少100个唯一有效帧后，按 ⌘Return 继续；显示端不会自动判定通过。")
+                    .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button("播放标定（M-CAL）") { controller.startCalibration() }
                         .disabled(controller.isBusy)
@@ -184,11 +189,28 @@ struct SettingsView: View {
         }
     }
 
+    private var cr002Actions: some View {
+        GroupBox("CR-002 定位与颜色诊断") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Button("静态诊断 A（独立会话）") { controller.start(mode: .staticA) }
+                    Button("VSync 黑白 B · 60s（独立会话）") { controller.start(mode: .dynamicBW) }
+                }
+                .disabled(controller.isBusy)
+                Text("A：白/黑/2×2 棋盘，各稳定1s、计划采样3s；B沿用所选实验的刷新请求。会话中设置窗口隐藏，⌘. 停止并导出。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("已核对外部相机定位，继续 RUN") { controller.continueAfterLargeTags() }
+                    .disabled(!controller.awaitingGeometryConfirmation)
+            }
+            .padding(6)
+        }
+    }
+
     private var actions: some View {
         HStack(spacing: 10) {
             Button("预览") { controller.preview() }
                 .disabled(controller.isBusy)
-            Button("开始") { controller.start() }
+            Button("开始") { controller.start(mode: DiagnosticSessionMode.none) }
                 .keyboardShortcut(.return, modifiers: [])
                 .disabled(controller.isBusy)
             Button(controller.canPause ? "暂停" : "恢复") { controller.pauseOrResume() }

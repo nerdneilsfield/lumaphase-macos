@@ -223,6 +223,41 @@ public enum SceneBuilder {
         return Scene(solid: solid)
     }
 
+    public static func fullscreenDiagnosticScene(
+        _ layout: FullscreenDiagnosticLayout, nativeFrameID: NativeFrameID
+    ) -> Scene {
+        switch layout.pattern {
+        case .white: return Scene(solid: background(layout.drawableSize, color: .white))
+        case .black: return Scene(solid: background(layout.drawableSize))
+        case .vsyncBlackWhite:
+            return Scene(solid: background(layout.drawableSize,
+                color: nativeFrameID.value % 2 == 0 ? .white : .black))
+        case .checkerboard:
+            let size = layout.patternSize
+            var solid: [SceneVertex] = []
+            for row in 0..<2 {
+                for column in 0..<2 {
+                    let logical = RectPx(x0: column * size.width / 2, y0: row * size.height / 2,
+                        x1: (column + 1) * size.width / 2, y1: (row + 1) * size.height / 2)
+                    solid += rect(PatternRotation.rect(logical, degrees: layout.patternRotationDeg, patternSize: size),
+                                  color: row == column ? .white : .black)
+                }
+            }
+            return Scene(solid: solid)
+        }
+    }
+
+    /// CR-002 static positioning only: original IDs, 3x Tag cells and three
+    /// low-frequency references. No payload, state sequence or session export.
+    public static func largeTagCalibrationScene(_ target: LargeTagCalibrationTarget) -> Scene {
+        var solid = background(target.drawableSize)
+        for marker in target.markers { solid += markerVertices(marker) }
+        for reference in target.references {
+            solid += rect(reference.rectPx, color: RGBA8(code: reference.level))
+        }
+        return Scene(solid: solid)
+    }
+
     public static func cardScene(_ layout: LayoutSpec, dynamicFill: RGBA8 = .midGray) -> Scene {
         var solid = frameBackgroundAndMarkers(layout)
         solid += rect(layout.dynamicRectPx, color: dynamicFill)

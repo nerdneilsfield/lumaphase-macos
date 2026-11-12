@@ -230,7 +230,7 @@ final class ExportTests: XCTestCase {
 
         // manifest
         let manifest = try JSONParser.parse(Data(contentsOf: directory.appendingPathComponent("manifest.json")))
-        XCTAssertEqual(manifest["schema_version"]?.stringValue, "1.1")
+        XCTAssertEqual(manifest["schema_version"]?.stringValue, "1.2")
         XCTAssertEqual(manifest["protocol_version"]?.stringValue, "OPTC-1")
         XCTAssertEqual(manifest["platform"]?.stringValue, "MACOS")
         XCTAssertEqual(manifest["clock_domain"]?.stringValue, "MACOS_HOST_TIME")
@@ -255,7 +255,7 @@ final class ExportTests: XCTestCase {
 
         // layout collection keeps both referenced layouts.
         let layouts = try JSONParser.parse(Data(contentsOf: directory.appendingPathComponent("layout.json")))
-        XCTAssertEqual(layouts["schema_version"]?.stringValue, "1.1")
+        XCTAssertEqual(layouts["schema_version"]?.stringValue, "1.2")
         let layoutList = try XCTUnwrap(layouts["layouts"]?.arrayValue)
         XCTAssertEqual(layoutList.compactMap { $0["layout_id"]?.stringValue }, ["layout-0", "layout-1"])
         XCTAssertEqual(layoutList[0]["modules"]?.arrayValue?.count, 68)
@@ -560,7 +560,7 @@ final class ExportTests: XCTestCase {
         try runSyntheticSession(session, includeProfile: false, grid: true)
         let directory = session.package.directory
         let layouts = try JSONParser.parse(Data(contentsOf: directory.appendingPathComponent("layout.json")))
-        XCTAssertEqual(layouts["schema_version"]?.stringValue, "1.1")
+        XCTAssertEqual(layouts["schema_version"]?.stringValue, "1.2")
         let entries = try XCTUnwrap(layouts["layouts"]?.arrayValue)
         XCTAssertEqual(entries.map { $0["geometry_profile"]?.stringValue }, ["F68-G6x12", "C52-G5x12"])
         XCTAssertEqual(entries.map { $0["padding"]?.arrayValue?.count }, [4, 8])

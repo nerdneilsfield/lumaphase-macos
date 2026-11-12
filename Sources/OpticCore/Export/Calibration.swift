@@ -152,6 +152,18 @@ public enum CalibrationError: Error, Equatable {
 }
 
 public enum CalibrationMatcher {
+    public static func binding(
+        segment: SegmentConfig, layout: DisplayLayout, profile: ImportedCalibrationProfile?,
+        sourceDeviceID: String, osBuild: String
+    ) -> SegmentProfileBinding {
+        if case .optc(let optc) = layout {
+            return binding(segment: segment, layout: optc, profile: profile,
+                           sourceDeviceID: sourceDeviceID, osBuild: osBuild)
+        }
+        return SegmentProfileBinding(segmentID: segment.segmentID, profileID: profile?.profileID,
+            status: profile == nil ? .missing : .importedUnverified, mismatchFields: [])
+    }
+
     /// Compares the imported key against the segment and its layout. A missing
     /// profile is `MISSING`; unknown key fields prevent `COMPATIBLE` but do not
     /// by themselves mean a mismatch.
@@ -223,7 +235,7 @@ public struct DisplayProfileDocument {
 
     public func json() -> JSONValue {
         .object([
-            "schema_version": .string("1.1"),
+            "schema_version": .string("1.2"),
             "profiles": .array(profiles.map { $0.json() }),
             "segment_bindings": .array(bindings.map { $0.json() })
         ])

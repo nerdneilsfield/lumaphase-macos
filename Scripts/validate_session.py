@@ -115,7 +115,7 @@ def validate(directory, allow_incomplete):
 
     # ---- manifest ----
     schema = manifest.get("schema_version")
-    check(schema in ("1.0", "1.1"), "schema_version")
+    check(schema in ("1.0", "1.1", "1.2"), "schema_version")
     check(layouts.get("schema_version") == schema, "layout schema matches manifest")
     check(manifest.get("protocol_version") == "OPTC-1", "protocol_version")
     session_id = manifest.get("session_id", "")
@@ -169,18 +169,85 @@ def validate(directory, allow_incomplete):
         layout = obj(layout, "layout")
         layout_id = layout.get("layout_id")
         layout_by_id[layout_id] = layout
-        profile = layout.get("layout_profile")
-        check(profile in ("F68", "C52"), "layout_profile")
-        module_count = 68 if profile == "F68" else 52
         width = layout.get("drawable_width_px")
         height = layout.get("drawable_height_px")
         rotation = layout.get("pattern_rotation_deg")
-        check(rotation in (0, 90, 180, 270), "pattern_rotation_deg")
+        valid_size = type(width) is int and type(height) is int and width > 0 and height > 0
+        check(valid_size, "positive integer drawable dimensions")
+        valid_rotation = type(rotation) is int and rotation in (0, 90, 180, 270)
+        check(valid_rotation, "pattern_rotation_deg")
+        check(isinstance(layout_id, str) and bool(layout_id), "nonempty layout_id")
+        if not valid_size or not valid_rotation:
+            continue
         check(layout.get("coordinate_system") == "DRAWABLE_TOP_LEFT_PIXEL_EDGES", "coordinate_system")
         w_p, h_p = (width, height) if rotation in (0, 180) else (height, width)
-        check(layout.get("pattern_width_px") == w_p, "pattern_width_px")
-        check(layout.get("pattern_height_px") == h_p, "pattern_height_px")
+        check(type(layout.get("pattern_width_px")) is int and layout["pattern_width_px"] == w_p, "pattern_width_px")
+        check(type(layout.get("pattern_height_px")) is int and layout["pattern_height_px"] == h_p, "pattern_height_px")
 
+        kind = layout.get("layout_type", "OPTC" if schema in ("1.0", "1.1") else None)
+        check(kind in ("OPTC", "CALIBRATION_TARGET", "FULLSCREEN_DIAGNOSTIC"), "layout_type required/known")
+        if schema in ("1.0", "1.1"):
+            check(kind == "OPTC", "legacy schema only supports OPTC")
+        matrix = {0: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                  90: [[0, -1, h_p], [1, 0, 0], [0, 0, 1]],
+                  180: [[-1, 0, w_p], [0, -1, h_p], [0, 0, 1]],
+                  270: [[0, 1, 0], [-1, 0, w_p], [0, 0, 1]]}
+        value = layout.get("pattern_to_drawable")
+        check(isinstance(value, list) and len(value) == 3
+              and all(isinstance(row, list) and len(row) == 3
+                      and all(type(n) in (int, float) for n in row) for row in value)
+              and value == matrix[rotation], "pattern_to_drawable pure rotation")
+        if kind != "OPTC":
+            forbidden = {"layout_profile", "geometry_profile", "grid_rows", "grid_cols", "module_count",
+                         "padding_count", "module_order", "sampling_inner_fraction", "modules", "padding", "dynamic_rect_px"}
+            check(not forbidden.intersection(layout), "non-OPTC contains payload geometry")
+            if kind == "FULLSCREEN_DIAGNOSTIC":
+                check("markers" not in layout and "reference_regions" not in layout, "fullscreen has no markers/reference regions")
+                check(layout.get("diagnostic_pattern") in ("WHITE", "BLACK", "CHECKERBOARD_2X2", "VSYNC_BLACK_WHITE"), "diagnostic_pattern")
+                check(type(layout.get("level_low")) is int and layout["level_low"] == 0
+                      and type(layout.get("level_high")) is int and layout["level_high"] == 255, "diagnostic levels")
+            elif kind == "CALIBRATION_TARGET":
+                markers = layout.get("markers", [])
+                check(isinstance(markers, list) and [m.get("id") for m in markers] == [0, 1, 2, 3], "target four original IDs")
+                protected = []
+                run_cell = max(1, min(w_p, h_p) // 64)
+                run_margin = (h_p - h_p * 68 // 100) // 2
+                while run_cell > 1 and 9 * run_cell > run_margin:
+                    run_cell //= 2
+                for marker in markers:
+                    cell, quiet = marker.get("cell_size_px"), marker.get("quiet_zone_px")
+                    valid_cell = type(cell) is int and cell >= 2 and type(quiet) is int and quiet >= cell
+                    check(valid_cell, "target cell/quiet")
+                    if not valid_cell:
+                        continue
+                    check(cell == 3 * run_cell, "Mac target fixed 3x RUN cell")
+                    check(marker.get("dictionary") == "DICT_4X4_50" and marker.get("border_bits") == 1
+                          and marker.get("marker_size_bits") == 4, "target dictionary/border")
+                    points = marker.get("corners_px", [])
+                    check(len(points) == 4 and all(len(v) == 2 and all(type(n) is int for n in v) for v in points), "target corners")
+                    xs, ys = [v[0] for v in points], [v[1] for v in points]
+                    box = [min(xs), min(ys), max(xs), max(ys)]
+                    check(box[2]-box[0] == 6*cell and box[3]-box[1] == 6*cell, "target black edge")
+                    outer = [box[0]-quiet, box[1]-quiet, box[2]+quiet, box[3]+quiet]
+                    check(inside(outer, [0, 0, width, height]), "target quiet inside drawable")
+                    check(all(not intersects(outer, other) for other in protected), "target quiet nonoverlap")
+                    protected.append(outer)
+                refs = layout.get("reference_regions", [])
+                check(isinstance(refs, list) and len(refs) > 0, "target references nonempty")
+                ref_rects = []
+                for index, patch in enumerate(refs):
+                    check(type(patch.get("index")) is int and patch["index"] == index, "reference index")
+                    rect = patch.get("rect_px")
+                    check(isinstance(rect, list) and len(rect) == 4 and all(type(n) is int for n in rect), "reference rect type")
+                    check(rect[0] < rect[2] and rect[1] < rect[3] and inside(rect, [0, 0, width, height]), "reference positive/inside")
+                    check(type(patch.get("level")) is int and 0 <= patch["level"] <= 255, "reference code")
+                    check(all(not intersects(rect, other) for other in protected + ref_rects), "reference quiet/reference nonoverlap")
+                    ref_rects.append(rect)
+            continue
+
+        profile = layout.get("layout_profile")
+        check(profile in ("F68", "C52"), "layout_profile")
+        module_count = 68 if profile == "F68" else 52
         bw = w_p * 96 // 100
         bh = h_p * 68 // 100
         a = (w_p - bw) // 2
@@ -274,6 +341,9 @@ def validate(directory, allow_incomplete):
 
     for segment in segments:
         check(segment["layout_id"] in layout_by_id, "segment references unknown layout_id")
+        actual = layout_by_id.get(segment["layout_id"], {})
+        for field in ("drawable_width_px", "drawable_height_px"):
+            check(segment.get(field) == actual.get(field), f"segment/layout {field} mismatch")
 
     # ---- display events ----
     required = {"event_seq", "event_type", "session_id", "segment_id", "layout_id",
@@ -293,6 +363,7 @@ def validate(directory, allow_incomplete):
     check(seqs == list(range(len(display))), "display event_seq is not a contiguous prefix from 0")
 
     submitted_keys = set()
+    submitted_identity_by_frame = {}
     last_present_by_key = {}
     deltas = []
     render_complete_valid = 0
@@ -303,11 +374,20 @@ def validate(directory, allow_incomplete):
         check(event.get("session_id") == session_id, "event session mismatch")
         check(event.get("segment_id") in segment_ids, "event segment not in manifest")
         check(event.get("layout_id") in layout_by_id, "event layout not exported")
+        segment_config = next((s for s in segments if s["segment_id"] == event.get("segment_id")), {})
+        check(event.get("layout_id") == segment_config.get("layout_id"), "event layout must match original segment")
+        event_layout = layout_by_id.get(event.get("layout_id"), {})
+        layout_kind = event_layout.get("layout_type", "OPTC")
+        if layout_kind != "OPTC":
+            check(event.get("frame_kind") == "CALIBRATION" and event.get("phase") == "CALIBRATION", "non-OPTC calibration identity")
+        if event_layout.get("diagnostic_pattern") == "VSYNC_BLACK_WHITE":
+            check(isinstance(event.get("native_frame_id"), str), "BW native_frame_id decimal string")
         check(re.fullmatch(r"0|[1-9][0-9]*", str(event.get("native_frame_id"))) is not None,
               "native_frame_id must be a decimal string")
         kind = event.get("frame_kind")
         check(kind in ("WARMUP", "SESSION_CARD", "DYNAMIC", "END_CARD", "CALIBRATION"), "frame_kind")
         if kind == "DYNAMIC":
+            check(layout_kind == "OPTC", "DYNAMIC only references OPTC")
             check(isinstance(event.get("render_seq"), str), "render_seq must be a string, not a number")
             check(event.get("payload_n") is not None and event.get("crc8") is not None,
                   "DYNAMIC frame must carry payload_n and crc8")
@@ -358,6 +438,15 @@ def validate(directory, allow_incomplete):
               "platform_ids keys")
 
         key = (event.get("segment_id"), event.get("native_frame_id"))
+        identity_fields = ("segment_id", "layout_id", "frame_kind", "phase", "render_seq", "payload_n", "crc8")
+        identity = tuple(event.get(field) for field in identity_fields)
+        if schema == "1.2":
+            native = event.get("native_frame_id")
+            if event["event_type"] == "SUBMITTED":
+                check(native not in submitted_identity_by_frame, "native_frame_id reused/duplicate submission")
+                submitted_identity_by_frame[native] = identity
+            else:
+                check(submitted_identity_by_frame.get(native) == identity, "result identity differs from original submission")
         if event["event_type"] == "SUBMITTED":
             submitted_keys.add(key)
             check(event.get("present_kind") is None, "SUBMITTED must not claim present_kind")
@@ -441,7 +530,8 @@ def validate(directory, allow_incomplete):
         key = profile_by_id.get(binding.get("profile_id"), {}).get("calibration_key", {})
         segment = segment_by_id.get(binding.get("segment_id"), {})
         layout = layout_by_id.get(segment.get("layout_id"), {})
-        if schema == "1.1":
+        check(layout.get("layout_type", "OPTC") == "OPTC", "non-OPTC cannot be COMPATIBLE")
+        if schema in ("1.1", "1.2"):
             check(key.get("geometry_profile") == layout.get("geometry_profile"),
                   "COMPATIBLE requires a verified geometry key")
         check(key.get("pixel_format") not in (None, "UNKNOWN")
@@ -474,6 +564,17 @@ def validate(directory, allow_incomplete):
             record["unconfirmed"].discard(key)
         if event["event_type"] == "UNCONFIRMED" and key not in record["presented"]:
             record["unconfirmed"].add(key)
+    # Pre-submit failures consume an allocated identity without a display row.
+    # Their existing configuration event is still evidence of generation.
+    for event in configuration:
+        if event.get("event_type") != "RENDER_FAILURE":
+            continue
+        frame_id = event.get("details", {}).get("native_frame_id")
+        segment_id = event.get("segment_id")
+        if frame_id is not None and segment_id is not None:
+            record = per_segment.setdefault(segment_id, {"generated": set(), "submitted": set(),
+                                                       "presented": set(), "unconfirmed": set()})
+            record["generated"].add((segment_id, frame_id))
     summary_by_segment = {item["segment_id"]: item for item in summary.get("segments", [])}
     check(set(summary_by_segment.keys()) == set(segment_ids), "summary segment set")
     for segment_id, record in per_segment.items():
